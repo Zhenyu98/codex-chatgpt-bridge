@@ -1,21 +1,47 @@
-# Codex ChatGPT Bridge
+<h1 align="center">Codex ChatGPT Bridge</h1>
 
-A safe bridge for Codex and ChatGPT to hand off coding work, save tokens on large reviews, and keep local execution under control.
+<p align="center">
+  <strong>A safe bridge that lets Codex and ChatGPT hand off coding work — ChatGPT does the heavy thinking, Codex keeps local execution and verification under control.</strong>
+</p>
 
-[简体中文](README_zh.md)
+<p align="center">
+  <strong>Save Codex tokens</strong> ·
+  <strong>ChatGPT plans, Codex executes</strong> ·
+  <strong>Local execution stays scoped and re-keyable</strong>
+</p>
 
-## What It Does
+<p align="center">
+  <a href="https://github.com/Zhenyu98/codex-chatgpt-bridge/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Zhenyu98/codex-chatgpt-bridge?style=for-the-badge&logo=github"></a>
+  <a href="LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge"></a>
+  <img alt="Windows PowerShell" src="https://img.shields.io/badge/Windows-PowerShell-blue?style=for-the-badge&logo=windows&logoColor=white">
+  <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-5B7266?style=for-the-badge">
+</p>
 
-`codex-chatgpt-bridge` is a user-level Codex skill package. It helps Codex decide when to work locally and when to ask ChatGPT for reasoning, review, visual analysis, or scoped local project inspection.
+<p align="center">
+  <a href="#why">Why</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#agent-setup">Agent Setup</a> ·
+  <a href="#routing-modes">Routing</a> ·
+  <a href="#security-model">Security</a> ·
+  <a href="#faq">FAQ</a> ·
+  <a href="README_zh.md">简体中文</a>
+</p>
 
-Core idea:
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Codex ChatGPT Bridge architecture" width="92%" />
+</p>
 
-- Codex owns edits, tests, builds, git, and final verification.
-- ChatGPT acts as a strong reasoning and review partner.
-- The local bridge is off by default and can be started only when needed.
-- Sensitive files, writes, destructive actions, privileged commands, and external irreversible actions stay behind explicit approval gates.
+## Why
 
-## Quick Install
+Long Codex sessions burn quota on planning, re-reading, and repeated design. This bridge moves that heavy thinking to ChatGPT and keeps Codex focused on execution and verification, so a long build stays within budget and under local control.
+
+| Before | After |
+|---|---|
+| Copy large context into the Codex chat to get a review | ChatGPT reads the scoped project directly over the bridge |
+| Codex spends quota planning, re-reading, and iterating | ChatGPT plans and reviews; Codex executes one task at a time |
+| A remote tool with unclear reach into your machine | A narrow, OAuth-gated root that is off by default and re-keyable |
+
+## Quick Start
 
 ```powershell
 git clone https://github.com/Zhenyu98/codex-chatgpt-bridge.git
@@ -23,13 +49,37 @@ cd codex-chatgpt-bridge
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-The installer copies the bundled skill to:
+Expected success signal:
 
 ```text
-%USERPROFILE%\.codex\skills\codex-chatgpt-bridge
+Installed codex-chatgpt-bridge skill to C:\Users\<you>\.codex\skills\codex-chatgpt-bridge
+Restart Codex or reload skills to use it.
 ```
 
-Restart Codex or reload skills after installation.
+Then check the local environment (no tunnel started):
+
+```powershell
+$skill = "$env:USERPROFILE\.codex\skills\codex-chatgpt-bridge"
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Doctor
+```
+
+## Agent Setup
+
+Copy this to Codex, Claude Code, Cursor, or another coding agent:
+
+```text
+Read https://github.com/Zhenyu98/codex-chatgpt-bridge/blob/main/agent-setup.md and follow it to install and configure codex-chatgpt-bridge for me.
+```
+
+See [agent-setup.md](agent-setup.md) for the full copy-paste prompt, prerequisites, and safe defaults.
+
+## Routing Modes
+
+- `NORMAL`: ChatGPT acts like a strong review/reasoning subagent. Codex inspects enough context to steer the task, then executes and verifies.
+- `TOKEN_SAVING`: Codex acts mostly as the orchestrator. Safe non-mutating reading, broad review, and synthesis go to ChatGPT whenever they save Codex tokens.
+- `CHATGPT_ARCHITECT`: the planning-inverted mode for long, continuous builds. ChatGPT is the architect/manager (spec, design, task decomposition, per-task prompts, review); Codex executes one small task at a time and verifies. With your explicit `L3` grant, ChatGPT can also write over the bridge while Codex integrates.
+
+The router picks by marginal cost: a unit of work goes to ChatGPT when it saves far more Codex tokens than one slow bridge round-trip. When a plan needs parallel subagents, ChatGPT can serve as the subagent pool so the fan-out stays off Codex quota, while Codex remains the single orchestrator that integrates and verifies.
 
 ## Bridge Switch
 
@@ -43,46 +93,57 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Acti
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Rotate
 ```
 
-`Start` opens the local MCP service and its selected tunnel. `Doctor` checks the environment plus tunnel and public reachability. `Stop` closes the service and tunnel while preserving the ChatGPT app configuration and authorization state, so the next start can reuse the same app when a stable URL is used. `Rotate` is the panic button: it stops the bridge, revokes all issued OAuth tokens, and mints a new Owner password — use it after any suspected unauthorized access, then start and re-authorize.
+`Start` opens the local MCP service and its selected tunnel. `Doctor` checks the environment plus tunnel and public reachability. `Stop` closes the service and tunnel while keeping the ChatGPT app configuration, so the next start reuses the same app when a stable URL is used. `Rotate` is the panic button: it stops the bridge, revokes all issued OAuth tokens, and mints a new Owner password — run it after any suspected unauthorized access, then start and re-authorize.
 
-## Routing Modes
-
-- `NORMAL`: ChatGPT acts like a strong review/reasoning subagent. Codex still inspects enough context to steer the task, then executes and verifies.
-- `TOKEN_SAVING`: Codex acts mostly as the orchestrator. Safe non-mutating reading, broad review, and synthesis go to ChatGPT whenever possible.
-- `CHATGPT_ARCHITECT`: the planning-inverted mode for long, continuous builds. ChatGPT is the architect/manager (spec, design, task decomposition, per-task prompts, review); Codex executes one small task at a time and verifies. Optionally, with your explicit `L3` grant, ChatGPT writes directly over the bridge and Codex integrates.
-
-The router picks by marginal cost: hand a unit of work to ChatGPT only when it saves far more Codex tokens than one slow bridge round-trip. When a plan needs parallel subagents, ChatGPT can serve as the subagent pool so the fan-out does not spend Codex quota — while Codex stays the single orchestrator that integrates and verifies.
-
-## ChatGPT App Setup
-
-See [README_zh.md](README_zh.md) for a detailed walkthrough, including how to create the ChatGPT app, choose the MCP URL, authorize the connection, and run a read-only smoke test.
-
-## Safety Defaults
-
-- Do not expose home directories, whole drives, `.env`, auth files, SSH keys, API keys, browser cookies, or unrelated private folders.
-- Keep the bridge root narrow: one project, one repo, one task.
-- Use read-only or diagnostic access by default.
-- Let Codex apply source edits and run verification locally.
+For a stable ChatGPT app URL across restarts, put a stable Worker / custom proxy or external tunnel in front of the changing Quick Tunnel. Full walkthrough for creating the ChatGPT app (developer mode, app URL, OAuth, smoke test) is in [README_zh.md](README_zh.md).
 
 ## Security Model
 
-Be honest with yourself about the trust boundary: once you OAuth-authorize the ChatGPT app, the bridge grants file read/write and shell execution on your machine. The `L0`–`L5` levels are policy that Codex instructs ChatGPT to follow, **not a sandbox** — `run_shell` is not confined to the root, so an authorized app effectively has local-user code execution. The boundaries that are actually enforced are: OAuth approval (a strong random Owner password), the narrow `allowedRoots` for file tools, and stopping the bridge.
+Be honest about the trust boundary: once you OAuth-authorize the ChatGPT app, the bridge grants file read/write and shell execution on your machine. The `L0`–`L5` levels are policy Codex instructs ChatGPT to follow; they are guidance, and `run_shell` is not confined to the root, so an authorized app effectively holds local-user code execution. The boundaries actually enforced are OAuth approval (a strong random Owner password), the narrow `allowedRoots` for file tools, and stopping the bridge.
 
 Practical rules:
 
-- Keep the bridge **stopped when you are not using it** — the always-on public endpoint is the main attack surface.
+- Keep the bridge stopped when you are not using it — the always-on public endpoint is the main attack surface.
 - Keep the root narrow and free of secrets; for stronger isolation, run under a least-privilege OS account or a disposable VM.
-- If you ever suspect someone else connected, run `-Action Rotate` to revoke all tokens and re-key.
+- If you suspect someone else connected, run `-Action Rotate` to revoke all tokens and re-key.
 
-## For Agent Users
+## FAQ
 
-If you want an agent (Codex, Claude Code, etc.) to install and configure this for you, use [agent-setup.md](agent-setup.md) — it starts with a copy-paste prompt and safe defaults.
+**Can ChatGPT run anything on my machine?**
+
+Once you OAuth-authorize the app, the bridge allows file read/write and shell within your setup. `run_shell` is not sandboxed, so treat an authorized app as local-user execution: keep the root narrow, stop the bridge when idle, and use `Rotate` to revoke access.
+
+**Does `Stop` revoke ChatGPT's access?**
+
+`Stop` closes the tunnel and service, so the workspace becomes unreachable, and it keeps the app authorization so the next `Start` reuses the same app. To actually revoke issued tokens, run `Rotate`.
+
+**Will ChatGPT edit my source directly?**
+
+In the default advice profile, Codex applies and verifies every change. With your explicit `L3` grant, ChatGPT writes over the bridge and Codex reviews the diff, runs an independent check, and owns git plus the final claim.
+
+**The Quick Tunnel URL keeps changing.**
+
+Quick Tunnel URLs rotate on restart, which suits testing. For a fixed ChatGPT app URL, front it with a stable Worker / custom proxy or external tunnel.
+
+## Contributing
+
+Issues and pull requests are welcome. Please keep reports specific, include reproduction steps when possible, and avoid sharing secrets in logs or screenshots.
 
 ## Acknowledgements
 
-- This project builds on the open-source [DevSpace](https://github.com/Waishnav/devspace) project by Waishnav.
+- Built on the open-source [DevSpace](https://github.com/Waishnav/devspace) project by Waishnav.
 - Special thanks to [LINUX.DO](https://linux.do/) for providing a promotion platform.
 
 ## License
 
-[MIT](LICENSE)
+Released under the MIT License. See [LICENSE](LICENSE).
+
+## Star History
+
+<a href="https://www.star-history.com/#Zhenyu98/codex-chatgpt-bridge&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date" />
+  </picture>
+</a>

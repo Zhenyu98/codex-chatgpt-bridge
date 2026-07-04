@@ -1,4 +1,34 @@
-# Codex ChatGPT Bridge
+<h1 align="center">Codex ChatGPT Bridge</h1>
+
+<p align="center">
+  <strong>让 Codex 与 ChatGPT 安全地分工协作：ChatGPT 负责深度思考，Codex 掌控本地执行与验证。</strong>
+</p>
+
+<p align="center">
+  <strong>省 Codex token</strong> ·
+  <strong>ChatGPT 规划，Codex 执行</strong> ·
+  <strong>本地执行可控、可改锁</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Zhenyu98/codex-chatgpt-bridge/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Zhenyu98/codex-chatgpt-bridge?style=for-the-badge&logo=github"></a>
+  <a href="LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge"></a>
+  <img alt="Windows PowerShell" src="https://img.shields.io/badge/Windows-PowerShell-blue?style=for-the-badge&logo=windows&logoColor=white">
+  <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-5B7266?style=for-the-badge">
+</p>
+
+<p align="center">
+  <a href="#适合谁">适合谁</a> ·
+  <a href="#安装">安装</a> ·
+  <a href="#路由模式">路由模式</a> ·
+  <a href="#安全模型">安全模型</a> ·
+  <a href="#常见问题">常见问题</a> ·
+  <a href="README.md">English</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Codex ChatGPT Bridge 架构" width="92%" />
+</p>
 
 让 Codex 和 ChatGPT 像两个协作代理一样分工：Codex 负责本地执行，ChatGPT 负责深度思考、审查和大上下文理解。
 
@@ -16,7 +46,7 @@
 - 想让 ChatGPT 帮忙读大项目，但不想把大量文件复制进 Codex 对话。
 - 想让 ChatGPT 做架构审查、论文/硬件/复杂 bug 的第二意见。
 - 想保留 Codex 对本地文件、测试、构建、git 的执行控制权。
-- 想在安全边界内使用本地 MCP，而不是长期暴露整个机器。
+- 想在安全边界内使用本地 MCP：窄暴露、用完即关、随时改锁。
 
 ## 工作方式
 
@@ -363,3 +393,13 @@ skills/codex-chatgpt-bridge/
 ## 许可证
 
 [MIT](LICENSE)
+
+## Star History
+
+<a href="https://www.star-history.com/#Zhenyu98/codex-chatgpt-bridge&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date" />
+  </picture>
+</a>
