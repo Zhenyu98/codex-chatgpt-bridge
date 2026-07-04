@@ -142,8 +142,8 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 <a href="https://www.star-history.com/#Zhenyu98/codex-chatgpt-bridge&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&legend=top-left" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&legend=top-left" />
   </picture>
 </a>
