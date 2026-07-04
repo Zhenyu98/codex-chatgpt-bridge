@@ -1,0 +1,12 @@
+{
+  "name": "codex-chatgpt-bridge",
+  "version": "0.1.0",
+  "description": "A Codex skill package for safer coding handoffs between Codex and ChatGPT.",
+  "skills": [
+    "skills/codex-chatgpt-bridge"
+  ],
+  "entrypoint": "skills/codex-chatgpt-bridge/SKILL.md",
+  "license": "MIT"
+}
+
+
