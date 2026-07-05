@@ -140,4 +140,4 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Zhenyu98/codex-chatgpt-bridge&type=Date&legend=top-left&v=20260705)](https://star-history.com/#Zhenyu98/codex-chatgpt-bridge&Date)
+[![Star History Chart](https://www.repostars.dev/api/og?repos=Zhenyu98%2Fcodex-chatgpt-bridge&theme=dark&ogv=4&v=20260705)](https://www.star-history.com/?repos=Zhenyu98%2Fcodex-chatgpt-bridge&type=date&legend=top-left)
