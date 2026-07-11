@@ -1,6 +1,6 @@
 interface:
   display_name: "Codex ChatGPT Bridge"
-  short_description: "Route coding work safely between Codex and ChatGPT."
-  default_prompt: "Use codex-chatgpt-bridge to route coding work between Codex and ChatGPT, start or stop a scoped local bridge, and enforce read-only defaults plus approval gates."
+  short_description: "Route work and recover the local bridge safely."
+  default_prompt: "Use $codex-chatgpt-bridge to route coding work, operate a scoped local bridge, and run verified Restart or Reboot recovery with approval gates."
 
 

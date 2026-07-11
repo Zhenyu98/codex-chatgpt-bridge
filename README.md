@@ -49,6 +49,8 @@ cd codex-chatgpt-bridge
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+If a copy is already installed, the installer moves it to a timestamped backup before copying the new skill. Use `-ForceOverwrite` only when you intentionally want to discard that installed copy. Add `-RegisterRestartTask` only if you also want the optional, on-demand Reboot task.
+
 Expected success signal:
 
 ```text
@@ -81,41 +83,75 @@ See [agent-setup.md](agent-setup.md) for the full copy-paste prompt, prerequisit
 
 The router picks by marginal cost: a unit of work goes to ChatGPT when it saves far more Codex tokens than one slow bridge round-trip. When a plan needs parallel subagents, ChatGPT can serve as the subagent pool so the fan-out stays off Codex quota, while Codex remains the single orchestrator that integrates and verifies.
 
-## Bridge Switch
+## Bridge Controller
 
 ```powershell
 $skill = "$env:USERPROFILE\.codex\skills\codex-chatgpt-bridge"
+$controller = "$skill\scripts\bridge_controller.ps1"
 
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Status
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Doctor
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Start -ProjectRoot <path> -Tunnel cloudflare -InstallCloudflared
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Stop
+# Save a non-secret profile once. Use cloudflare for a changing Quick Tunnel,
+# or cloudflare-worker plus a stable Worker URL.
+powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectRoot "D:\your\project" -Tunnel cloudflare -InstallCloudflared
+
+powershell -ExecutionPolicy Bypass -File $controller -Action On
+powershell -ExecutionPolicy Bypass -File $controller -Action Reboot
+powershell -ExecutionPolicy Bypass -File $controller -Action Off
+powershell -ExecutionPolicy Bypass -File $controller -Action Status
+powershell -ExecutionPolicy Bypass -File $controller -Action Doctor
+
+# Panic button: revoke issued OAuth tokens and mint a new Owner password.
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Rotate
 ```
 
-`Start` opens the local MCP service and its selected tunnel. `Doctor` checks the environment plus tunnel and public reachability. `Stop` closes the service and tunnel while keeping the ChatGPT app configuration, so the next start reuses the same app when a stable URL is used. `Rotate` is the panic button: it stops the bridge, revokes all issued OAuth tokens, and mints a new Owner password — run it after any suspected unauthorized access, then start and re-authorize.
+Use the controller for normal operation. `On` records an intentional running state. `Off` records an intentional stopped state and closes the service and tunnel while preserving the ChatGPT app configuration. `Restart` and `Reboot` are the same mutex-protected transaction: stop, start, refresh Worker KV when configured, and verify the local, Quick Tunnel, and stable Worker endpoints before success. A Reboot refuses to reopen a bridge intentionally turned off with `Off`; use `On` to open it again.
+
+For a stable Worker setup, configure the profile and store a minimum-scope Cloudflare token with Windows DPAPI **before** the first `On`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectRoot "D:\your\project" -Tunnel cloudflare-worker -PublicBaseUrl https://bridge.example.workers.dev -InstallCloudflared
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\set_cf_api_config.ps1" -Action Set -AccountId <account-id> -KvNamespaceId <namespace-id>
+powershell -ExecutionPolicy Bypass -File $controller -Action On
+```
+
+The credential helper reads the saved Worker URL from the controller profile and writes the matching non-credential operational metadata to `worker-proxy.json` alongside the DPAPI-protected credential. The file still contains your Worker URL and KV namespace ID: keep it local and out of git. You can override the URL explicitly with `-WorkerBaseUrl` for a standalone setup.
+
+The optional scheduled task is an external, on-demand recovery entrypoint. It has no automatic trigger and always calls the single `Reboot` transaction:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\restart_task.ps1" -Action Install
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\restart_task.ps1" -Action Run
+```
+
+`Run` only requests the task asynchronously. Confirm the final result in `%LOCALAPPDATA%\devspace-bridge\controller-result.json`, then run controller `Doctor`. The default task uses the same interactive Windows user, so that user must be logged on; it improves recovery reliability but is not a security boundary. True isolation needs a separate least-privilege OS account plus ACL-separated scripts, state, logs, and credentials.
+
+`Rotate` remains the panic button: it stops the bridge, revokes all issued OAuth tokens, and mints a new Owner password. Run it after suspected unauthorized access, then use controller `On` and re-authorize.
 
 For a stable ChatGPT app URL across restarts, put a stable Worker / custom proxy or external tunnel in front of the changing Quick Tunnel. Full walkthrough for creating the ChatGPT app (developer mode, app URL, OAuth, smoke test) is in [README_zh.md](README_zh.md).
 
 ## Security Model
 
-Be honest about the trust boundary: once you OAuth-authorize the ChatGPT app, the bridge grants file read/write and shell execution on your machine. The `L0`–`L5` levels are policy Codex instructs ChatGPT to follow; they are guidance, and `run_shell` is not confined to the root, so an authorized app effectively holds local-user code execution. The boundaries actually enforced are OAuth approval (a strong random Owner password), the narrow `allowedRoots` for file tools, and stopping the bridge.
+Be honest about the trust boundary: once you OAuth-authorize the ChatGPT app, the bridge grants file read/write and shell execution on your machine. The `L0`–`L5` levels are policy Codex instructs ChatGPT to follow; they are guidance, and `run_shell` is not confined to the root, so an authorized app effectively holds local-user code execution. The boundaries actually enforced are OAuth approval (a strong random Owner password), the narrow `allowedRoots` for file tools, and closing reachability with controller `Off`.
 
 Practical rules:
 
-- Keep the bridge stopped when you are not using it — the always-on public endpoint is the main attack surface.
+- Use controller `Off` when the bridge is idle — the always-on public endpoint is the main attack surface.
 - Keep the root narrow and free of secrets; for stronger isolation, run under a least-privilege OS account or a disposable VM.
 - If you suspect someone else connected, run `-Action Rotate` to revoke all tokens and re-key.
+- Controller state and logs contain local paths, PIDs, and tunnel URLs. Redact them before sharing screenshots or diagnostics.
 
 ## FAQ
 
 **Can ChatGPT run anything on my machine?**
 
-Once you OAuth-authorize the app, the bridge allows file read/write and shell within your setup. `run_shell` is not sandboxed, so treat an authorized app as local-user execution: keep the root narrow, stop the bridge when idle, and use `Rotate` to revoke access.
+Once you OAuth-authorize the app, the bridge allows file read/write and shell within your setup. `run_shell` is not sandboxed, so treat an authorized app as local-user execution: keep the root narrow, use controller `Off` when idle, and use `Rotate` to revoke access.
 
-**Does `Stop` revoke ChatGPT's access?**
+**Does `Off` revoke ChatGPT's access?**
 
-`Stop` closes the tunnel and service, so the workspace becomes unreachable, and it keeps the app authorization so the next `Start` reuses the same app. To actually revoke issued tokens, run `Rotate`.
+`Off` records that the shutdown is intentional and closes the tunnel and service, so the workspace becomes unreachable. It keeps the app authorization so the next `On` can reuse the same app. To revoke issued tokens, run `Rotate`.
+
+**Why not run low-level `Start` and `Stop` directly?**
+
+They remain recovery primitives, but they do not own the persistent desired-state contract. Normal operation goes through `On`, `Off`, and `Reboot`, which prevent an intentional shutdown from being mistaken for a failed bridge and add Worker KV plus health verification.
 
 **Will ChatGPT edit my source directly?**
 

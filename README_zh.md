@@ -87,6 +87,8 @@ cd codex-chatgpt-bridge
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+如果目标位置已经有旧版 skill，安装器会先把它移动到带时间戳的备份目录，再复制新版。只有明确要丢弃旧安装时才使用 `-ForceOverwrite`。如需同时注册可选的按需 Reboot 计划任务，可加 `-RegisterRestartTask`；它不会创建自动触发器。
+
 安装后 skill 会被复制到：
 
 ```text
@@ -110,48 +112,77 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Acti
 npm install -g @waishnav/devspace
 ```
 
-如需要临时 HTTPS tunnel，脚本可自动下载 `cloudflared`：
+## 配置、启动、关闭和重启
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Start -ProjectRoot <path> -Tunnel cloudflare -InstallCloudflared
-```
+正常生命周期统一走外部 controller。底层 `Start`/`Stop` 保留为恢复原语，不作为日常开关。
 
-## 启动和关闭本地桥
+### 1. 保存非密钥配置
 
-### 查看状态
+临时 Quick Tunnel：
 
 ```powershell
 $skill = "$env:USERPROFILE\.codex\skills\codex-chatgpt-bridge"
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Status
+$controller = "$skill\scripts\bridge_controller.ps1"
+
+powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectRoot "D:\your\project" -Tunnel cloudflare -InstallCloudflared
 ```
 
-### 启动临时通道
+稳定 Worker URL：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Start -ProjectRoot "D:\your\project" -Tunnel cloudflare -InstallCloudflared
+powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectRoot "D:\your\project" -Tunnel cloudflare-worker -PublicBaseUrl https://bridge.example.workers.dev -InstallCloudflared
 ```
 
-启动后脚本会输出 `mcpUrl`。这个 URL 是 ChatGPT app 里要填写的 MCP 地址。
+`Configure` 只保存项目路径、端口、隧道模式和稳定 URL，不保存 token。
 
-### 关闭通道
+### 2. Worker 模式先保存 KV 凭据
+
+如果使用 `cloudflare-worker`，第一次 `On` 前用最小权限 Cloudflare token 配置自动 KV 刷新：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Stop
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\set_cf_api_config.ps1" -Action Set -AccountId <account-id> -KvNamespaceId <namespace-id>
 ```
 
-`Stop` 会关闭本地 MCP 服务和 tunnel，使 ChatGPT 无法继续访问项目目录。
+脚本会安全提示输入 token，并用 Windows DPAPI `CurrentUser` 加密保存在 `%LOCALAPPDATA%\devspace-bridge`，不会把 token 放进命令行或输出。DPAPI 只保护静态文件；同一 Windows 用户下运行的桥、controller 和 `run_shell` 仍共享该用户权限，所以它不是权限隔离边界。
 
-注意：`Stop` 不会撤销 ChatGPT app 授权，也不会删除 app 配置。这样下次 `Start` 时可以复用同一个 ChatGPT app。
+凭据脚本会读取刚保存的 controller profile，把稳定 Worker URL 和 KV namespace 同步到不含认证凭据、但仍应留在本机且不得提交的 `worker-proxy.json`。独立配置时也可以显式传 `-WorkerBaseUrl`。
 
-如果你在 ChatGPT 里手动断开 app 或 revoke OAuth，下次可能需要重新授权。
+### 3. 日常开关与健康检查
 
-### 改锁 / Rotate（怀疑被别人连上时）
+```powershell
+powershell -ExecutionPolicy Bypass -File $controller -Action On
+powershell -ExecutionPolicy Bypass -File $controller -Action Reboot
+powershell -ExecutionPolicy Bypass -File $controller -Action Off
+powershell -ExecutionPolicy Bypass -File $controller -Action Status
+powershell -ExecutionPolicy Bypass -File $controller -Action Doctor
+```
+
+- `On` 记录“有意运行”，按保存的 profile 启动，并验证本地、Quick Tunnel、稳定 Worker 三层端点的 `200/401` 合约。
+- `Off` 先记录“有意停止”，再关闭本地 MCP 与 tunnel；保留 ChatGPT app、OAuth 和 profile，所以下次 `On` 不需要重建 app。
+- `Restart` 与 `Reboot` 是同一个加互斥锁的完整事务：停 → 启 → Worker KV 刷新 → 健康检查。它不是两个可被分别执行的命令。
+- `Off` 后执行 `Reboot` 会被拒绝，避免外部任务误把你有意关闭的桥重新打开；需要恢复时明确执行 `On`。
+- `Status` 和日志不含 token，但会包含本机路径、PID、日志路径和 tunnel URL；分享截图或诊断前请脱敏。
+
+### 4. 可选的独立重启入口
+
+按需计划任务由桥接进程之外的 Windows Task Scheduler 启动，适合在底层桥意外被 ChatGPT 关掉后恢复：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\restart_task.ps1" -Action Install
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\restart_task.ps1" -Action Run
+```
+
+它没有自动触发器，只调用固定的 `Reboot`；`MultipleInstances=IgnoreNew` 会避免并发重启。`Run` 只是异步提交请求，不代表已经成功。最终要查看 `%LOCALAPPDATA%\devspace-bridge\controller-result.json`，再运行 controller `Doctor`。
+
+默认任务使用当前用户的 `Interactive`、`Limited` 身份，因此该用户必须已登录。它解决“桥不能自己把自己拉起”的可靠性问题，不是安全隔离。真正的授权边界需要专门的最小权限 Windows 账号，并用 ACL 隔离脚本、状态、日志和凭据。
+
+### 5. 改锁 / Rotate（怀疑被别人连上时）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\local_bridge.ps1" -Action Rotate
 ```
 
-`Rotate` 是“一键改锁”：停桥（清内存 token）→ 删除 `oauth-state.json`（吊销已签发的 token）→ 生成新的 Owner password。之后 `Start`，再用新密码重新授权你自己的 ChatGPT。任何“是不是被别人连了”的疑虑，跑它就对了。
+`Rotate` 是“一键改锁”：停桥（清内存 token）→ 删除 `oauth-state.json`（吊销已签发的 token）→ 生成新的 Owner password。之后用 controller `On`，再用新密码重新授权你自己的 ChatGPT。任何“是不是被别人连了”的疑虑，跑它就对了。
 
 ## 让 ChatGPT 不用每次重新设置
 
@@ -328,9 +359,10 @@ ChatGPT 会打开授权页面。
 
 实操建议：
 
-- **不用时就 `Stop`**——常驻的公网端点是主要攻击面。
+- **不用时就用 controller `Off`**——常驻的公网端点是主要攻击面。
 - root 要窄、不含密钥；要更强隔离就跑在最小权限账号或一次性 VM 里。
 - 一旦怀疑别人连上，跑 `-Action Rotate` 吊销所有 token 并改锁。
+- controller 状态和日志包含路径、PID 与 tunnel URL，分享前先脱敏。
 
 ## 面向 Agent 用户
 
@@ -340,7 +372,7 @@ ChatGPT 会打开授权页面。
 
 ### 关闭后 ChatGPT 还会不会访问本地项目？
 
-正常情况下不会。`Stop` 会关闭本地 MCP 服务和 tunnel。
+正常情况下不会。controller `Off` 会记录“有意停止”，并关闭本地 MCP 服务和 tunnel。
 
 但 ChatGPT 端可能仍保留 app 连接记录。这个记录本身不是本地通道；只有服务和 tunnel 重新打开时才可访问。
 
@@ -349,7 +381,7 @@ ChatGPT 会打开授权页面。
 因为 revoke 后下次可能需要重新授权。这个项目的目标是：
 
 ```text
-平时关闭通道 → 使用时打开 → 用完关闭 → 不反复重配 ChatGPT app
+平时 `Off` → 使用时 `On` → 需要时 `Reboot` → 不反复重配 ChatGPT app
 ```
 
 ### Quick Tunnel 为什么不适合长期配置？
@@ -368,13 +400,19 @@ Quick Tunnel URL 可能变化。适合测试，不适合作为长期 ChatGPT app
 skills/codex-chatgpt-bridge/
   SKILL.md
   agents/openai.yaml
-  scripts/local_bridge.ps1
+  scripts/
+    bridge_controller.ps1
+    local_bridge.ps1
+    restart_task.ps1
+    set_cf_api_config.ps1
   references/
     bridge-operations.md
     router-policy.md
     examples.md
     hook-design.md
     agents-snippet.md
+tests/
+  static_validation.ps1
 ```
 
 ## 路线图

@@ -37,12 +37,12 @@
   <rect x="600" y="352" width="300" height="96" rx="12" fill="#fff8e6" stroke="#d4a72c"/>
   <text x="750" y="380" text-anchor="middle" font-size="16" font-weight="700" fill="#7a5c00">Local Bridge</text>
   <text x="750" y="402" text-anchor="middle" font-size="12" fill="#1f2328">devspace MCP + Cloudflare tunnel</text>
-  <text x="750" y="422" text-anchor="middle" font-size="12" fill="#1f2328">→ one narrow project root</text>
-  <text x="750" y="440" text-anchor="middle" font-size="11" fill="#57606a">OAuth-gated · off by default · Stop / Rotate</text>
+  <text x="750" y="422" text-anchor="middle" font-size="12" fill="#1f2328">file tools → one narrow project root</text>
+  <text x="750" y="440" text-anchor="middle" font-size="11" fill="#57606a">controller On · Off · Reboot · Rotate to revoke</text>
 
   <!-- ChatGPT -> Bridge -->
   <line x1="750" y1="300" x2="750" y2="352" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
-  <text x="762" y="330" font-size="11" fill="#8c959f">scoped read / write</text>
+  <text x="762" y="330" font-size="10" fill="#8c959f">run_shell = local-user authority</text>
 
   <!-- Codex local tools note -->
   <rect x="60" y="352" width="300" height="96" rx="12" fill="#f6f8fa" stroke="#d0d7de"/>

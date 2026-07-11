@@ -1,0 +1,182 @@
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+  [ValidateSet("Set", "Status", "Clear")]
+  [string]$Action = "Status",
+
+  [string]$AccountId,
+
+  [string]$KvNamespaceId,
+
+  [string]$WorkerBaseUrl,
+
+  [string]$KvKey = "current",
+
+  [string]$StateDir = (Join-Path $env:LOCALAPPDATA "devspace-bridge")
+)
+
+$ErrorActionPreference = "Stop"
+$ConfigPath = Join-Path $StateDir "cf-api.protected.json"
+$LegacyConfigPath = Join-Path $StateDir "cf-api.json"
+$ProfilePath = Join-Path $StateDir "controller-profile.json"
+$WorkerProxyConfigPath = Join-Path $StateDir "worker-proxy.json"
+
+function Write-Json($obj) {
+  [Console]::Out.WriteLine(($obj | ConvertTo-Json -Depth 6))
+}
+
+function Write-JsonFileNoBom($obj, [string]$path) {
+  $json = $obj | ConvertTo-Json -Depth 6
+  $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
+}
+
+function Get-JsonFile([string]$path) {
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  $utf8 = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::ReadAllText($path, $utf8) | ConvertFrom-Json
+}
+
+switch ($Action) {
+  "Status" {
+    $configured = Test-Path -LiteralPath $ConfigPath
+    $legacyPresent = Test-Path -LiteralPath $LegacyConfigPath
+    $metadata = $null
+    if ($configured) {
+      $utf8 = New-Object System.Text.UTF8Encoding $false
+      $saved = [System.IO.File]::ReadAllText($ConfigPath, $utf8) | ConvertFrom-Json
+      $metadata = [ordered]@{
+        accountIdPresent = [bool]$saved.accountId
+        kvNamespaceIdPresent = [bool]$saved.kvNamespaceId
+        protectedTokenPresent = [bool]$saved.apiTokenProtected
+        protection = [string]$saved.protection
+      }
+    }
+    $workerProxy = Get-JsonFile $WorkerProxyConfigPath
+    Write-Json ([ordered]@{
+      action = "Status"
+      configured = ($configured -or $legacyPresent)
+      effectiveMode = if ($configured) { "dpapi" } elseif ($legacyPresent) { "plaintext-legacy" } else { "missing" }
+      path = $ConfigPath
+      legacyPath = $LegacyConfigPath
+      legacyPresent = $legacyPresent
+      metadata = $metadata
+      workerProxyPath = $WorkerProxyConfigPath
+      workerProxyConfigured = [bool]$workerProxy
+      workerProxyMetadata = if ($workerProxy) {
+        [ordered]@{
+          workerBaseUrlPresent = [bool]$workerProxy.workerBaseUrl
+          kvNamespaceIdPresent = [bool]$workerProxy.kvNamespaceId
+          kvKeyPresent = [bool]$workerProxy.kvKey
+        }
+      } else { $null }
+    })
+    break
+  }
+
+  "Clear" {
+    if ((Test-Path -LiteralPath $ConfigPath) -and $PSCmdlet.ShouldProcess($ConfigPath, "Delete protected Cloudflare API configuration")) {
+      Remove-Item -LiteralPath $ConfigPath -Force
+    }
+    if ((Test-Path -LiteralPath $LegacyConfigPath) -and $PSCmdlet.ShouldProcess($LegacyConfigPath, "Delete legacy plaintext Cloudflare API configuration")) {
+      Remove-Item -LiteralPath $LegacyConfigPath -Force
+    }
+    Write-Json ([ordered]@{
+      action = "Clear"
+      configured = ((Test-Path -LiteralPath $ConfigPath) -or (Test-Path -LiteralPath $LegacyConfigPath))
+      path = $ConfigPath
+      legacyPath = $LegacyConfigPath
+    })
+    break
+  }
+
+  "Set" {
+    if (-not $AccountId) { throw "-AccountId is required for Action Set." }
+    if (-not $KvNamespaceId) { throw "-KvNamespaceId is required for Action Set." }
+
+    $profile = Get-JsonFile $ProfilePath
+    $existingProxy = Get-JsonFile $WorkerProxyConfigPath
+    $effectiveWorkerBaseUrl = if ($WorkerBaseUrl) {
+      $WorkerBaseUrl.TrimEnd("/")
+    } elseif ($profile -and $profile.tunnel -eq "cloudflare-worker" -and $profile.publicBaseUrl) {
+      ([string]$profile.publicBaseUrl).TrimEnd("/")
+    } elseif ($existingProxy -and $existingProxy.workerBaseUrl) {
+      ([string]$existingProxy.workerBaseUrl).TrimEnd("/")
+    } else {
+      $null
+    }
+    if ($profile -and $profile.tunnel -eq "cloudflare-worker" -and -not $effectiveWorkerBaseUrl) {
+      throw "The cloudflare-worker controller profile is missing publicBaseUrl. Run controller Configure first."
+    }
+    if ($profile -and $profile.tunnel -eq "cloudflare-worker" -and $WorkerBaseUrl -and
+        -not $effectiveWorkerBaseUrl.Equals(([string]$profile.publicBaseUrl).TrimEnd("/"), [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "WorkerBaseUrl does not match the saved cloudflare-worker profile. Run controller Configure first to change the stable URL."
+    }
+    if ($effectiveWorkerBaseUrl) {
+      $parsedWorkerUri = $null
+      if (-not [Uri]::TryCreate($effectiveWorkerBaseUrl, [UriKind]::Absolute, [ref]$parsedWorkerUri) -or
+          $parsedWorkerUri.Scheme -ne "https" -or
+          [string]::IsNullOrWhiteSpace($parsedWorkerUri.Host)) {
+        throw "WorkerBaseUrl must be an absolute HTTPS URL with a host."
+      }
+    }
+    $workerProxyRecord = if ($effectiveWorkerBaseUrl) {
+      [ordered]@{
+        workerBaseUrl = $effectiveWorkerBaseUrl
+        kvNamespaceId = $KvNamespaceId
+        kvKey = if ($KvKey) { $KvKey } else { "current" }
+        updatedAt = (Get-Date).ToString("o")
+      }
+    } else { $null }
+
+    $secureToken = Read-Host "Cloudflare API token (Workers KV Storage: Edit only)" -AsSecureString
+    $bstr = [IntPtr]::Zero
+    $plainBytes = $null
+    try {
+      $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+      $plainToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+      if ([string]::IsNullOrWhiteSpace($plainToken)) {
+        throw "The API token cannot be empty."
+      }
+      $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($plainToken)
+      $cipherBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+        $plainBytes,
+        $null,
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+      )
+      $record = [ordered]@{
+        accountId = $AccountId
+        kvNamespaceId = $KvNamespaceId
+        apiTokenProtected = [Convert]::ToBase64String($cipherBytes)
+        protection = "Windows-DPAPI-CurrentUser"
+        updatedAt = (Get-Date).ToString("o")
+      }
+      $targetDescription = if ($workerProxyRecord) {
+        "Write DPAPI-protected Cloudflare API configuration and local-only Worker proxy metadata"
+      } else {
+        "Write DPAPI-protected Cloudflare API configuration"
+      }
+      if ($PSCmdlet.ShouldProcess($ConfigPath, $targetDescription)) {
+        New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+        Write-JsonFileNoBom $record $ConfigPath
+        if ($workerProxyRecord) {
+          Write-JsonFileNoBom $workerProxyRecord $WorkerProxyConfigPath
+        }
+      }
+    } finally {
+      if ($plainBytes) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+      if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    }
+
+    Write-Json ([ordered]@{
+      action = "Set"
+      configured = (Test-Path -LiteralPath $ConfigPath)
+      path = $ConfigPath
+      protection = "Windows-DPAPI-CurrentUser"
+      workerProxyPath = $WorkerProxyConfigPath
+      workerProxyConfigured = (Test-Path -LiteralPath $WorkerProxyConfigPath)
+      legacyPlaintextPresent = (Test-Path -LiteralPath $LegacyConfigPath)
+      note = "The token is encrypted for the current Windows user and is never printed. When a Worker URL is available, local-only worker-proxy.json metadata is synchronized too; keep it out of git. Remove any legacy cf-api.json after verifying migration."
+    })
+    break
+  }
+}

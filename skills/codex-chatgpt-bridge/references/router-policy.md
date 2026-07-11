@@ -90,7 +90,7 @@ Non-negotiable guardrails (both profiles):
 - Do not over-decompose: a few short files or one deterministic edit -> Codex just does it via `ROUTE_CODEX_EXECUTE`.
 - One task at a time: if scope balloons, re-decompose into new tasks rather than absorbing them inline.
 - A task is done only when its acceptance criteria pass an independent local check - Codex's verification in the advice profile, Codex's integrator pass in the independent-agent profile - never on ChatGPT's say-so alone. The loop pauses at L4-L5 and at any verification failure.
-- Independent-agent writes are real and only loosely contained: the bridge exposes `write_file`/`edit_file` (root-scoped) and `run_shell` (NOT root-scoped - effectively local-user execution). The permission ladder is policy, not a sandbox (see Enforcement reality). So narrow `allowedRoots`, keep secrets out of the root, and rely on diff review plus Stop-discipline - not on the bridge - to contain ChatGPT.
+- Independent-agent writes are real and only loosely contained: the bridge exposes `write_file`/`edit_file` (root-scoped) and `run_shell` (NOT root-scoped - effectively local-user execution). The permission ladder is policy, not a sandbox (see Enforcement reality). So narrow `allowedRoots`, keep secrets out of the root, and rely on diff review plus controller `Off` discipline - not on the bridge - to contain ChatGPT.
 
 ## Routing Quick Reference
 
@@ -144,7 +144,7 @@ These levels are policy Codex instructs ChatGPT to honor; the devspace bridge do
 
 Consequences:
 - Granting `L3` unlocks no new capability - authorization already did. `L3` is the policy decision to let ChatGPT actually write/run; `L1`/`L2` are you asking it not to. The "forbidden even at L3" list is enforced only by ChatGPT's compliance plus root-scoping of the file tools; `run_shell` can bypass it. It is a discipline, not a sandbox.
-- So when treating ChatGPT as an independent agent, the real protections are: a narrow root with no secrets inside it, Codex/human review of the diff before any commit/push/release, prompt-injection hygiene on whatever ChatGPT reads, and Stop-discipline. For higher assurance run the bridge under a least-privilege OS account or a disposable VM/container, and only authorize the app for a workspace where local-user execution is acceptable.
+- So when treating ChatGPT as an independent agent, the real protections are: a narrow root with no secrets inside it, Codex/human review of the diff before any commit/push/release, prompt-injection hygiene on whatever ChatGPT reads, and controller `Off` discipline. For higher assurance run the bridge under a least-privilege OS account or a disposable VM/container, and only authorize the app for a workspace where local-user execution is acceptable.
 
 ## Route Selection
 
@@ -478,8 +478,7 @@ Never request a generic privileged shell, unrestricted admin PowerShell, or broa
 | Treating local bridge as a general remote shell | Use the permission ladder and narrow root |
 | Auto-approving installs or deletes | Route to human approval |
 | Trusting ChatGPT's verdict without local evidence | Verify with files, tests, builds, generated artifacts, or user confirmation |
-| Forgetting tunnel state | Use `codex-chatgpt-bridge` for service status and stop/start discipline |
+| Forgetting tunnel state | Use controller `Status`, `On`, `Off`, and the single-transaction `Reboot` lifecycle |
 | Running ChatGPT's task graph unchecked in `CHATGPT_ARCHITECT` | Codex feasibility-checks the plan against the repo, then verifies each task locally before marking it done |
 | Over-decomposing trivial work into a plan/review loop | For a few short files or one deterministic edit, Codex executes directly via `ROUTE_CODEX_EXECUTE` |
-
 

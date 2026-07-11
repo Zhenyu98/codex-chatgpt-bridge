@@ -1,7 +1,9 @@
 .DS_Store
 Thumbs.db
 *.log
+*.jsonl
 *.tmp
+*.bak
 node_modules/
 .env
 .env.*
@@ -9,10 +11,12 @@ oauth-state.json
 worker-proxy.json
 state.json
 cf-api.json
+cf-api.protected.json
 auth.json
+controller-profile.json
+controller-result.json
+desired-state.json
 id_rsa
 id_rsa.pub
 *.pem
 *.key
-
-

@@ -17,35 +17,52 @@ Default posture: keep the bridge off unless the user asks to use it, expose only
 
 ## Service Switch
 
-Use `scripts/local_bridge.ps1` for repeatable operations.
+Use `scripts/bridge_controller.ps1` for normal lifecycle operations. Keep `scripts/local_bridge.ps1` as the low-level runtime primitive and panic-rotate entrypoint.
 
 ```powershell
-# Start for the current directory with Cloudflare Quick Tunnel
-powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Start -ProjectRoot <path> -Tunnel cloudflare -InstallCloudflared
+# Persist the non-secret restart profile
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action Configure -ProjectRoot <path> -Tunnel cloudflare-worker -PublicBaseUrl https://bridge.example.workers.dev -InstallCloudflared
 
-# Start with an already-managed HTTPS tunnel or stable public URL
-powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Start -ProjectRoot <path> -Tunnel external -PublicBaseUrl https://your-host.example.com
+# Worker mode only: store the minimum-scope KV token with Windows DPAPI before On
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\set_cf_api_config.ps1 -Action Set -AccountId <account-id> -KvNamespaceId <namespace-id>
 
-# Start through a stable Cloudflare Workers proxy backed by a changing Quick Tunnel
-powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Start -ProjectRoot <path> -Tunnel cloudflare-worker -PublicBaseUrl https://local-bridge.<workers-subdomain>.workers.dev
+# Intentionally open or close the bridge
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action On
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action Off
 
-# Inspect running processes and the current MCP URL
-powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Status
+# One verified transaction; Reboot is an alias of Restart
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action Restart
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action Reboot
 
-# Run doctor: devspace doctor (PATH fixed for npm and Git Bash) plus cloudflared
-# presence, local-port listening, and public OAuth/MCP reachability when state exists
-powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Doctor
+# Inspect controller/runtime state and health
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action Status
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\bridge_controller.ps1 -Action Doctor
 
-# Stop local bridge and the tunnel started by this switch
-powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Stop
+# Optional on-demand scheduled task; no automatic trigger
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\restart_task.ps1 -Action Install
+powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\restart_task.ps1 -Action Run
 
 # Panic button / re-key: stop, revoke all issued OAuth tokens, mint a new Owner password
 powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Rotate
 ```
 
+The credential helper derives `worker-proxy.json` from the saved `cloudflare-worker` profile, so the required order on a fresh setup is `Configure` -> `set_cf_api_config Set` -> `On`. The scheduled task `Run` command is asynchronous; verify `%LOCALAPPDATA%\devspace-bridge\controller-result.json` and controller `Doctor` before reporting success.
+
 ## Switch Semantics
 
-Use `Start` and `Stop` as an operational safety switch.
+Use `On`, `Off`, and `Restart`/`Reboot` as the operational safety switch.
+
+The controller keeps three concerns separate:
+
+- `controller-profile.json`: persistent non-secret project/tunnel configuration
+- `desired-state.json`: the operator's intentional `running` or `stopped` state
+- `state.json`: transient process IDs, current Quick Tunnel, Worker status, and logs
+
+`Restart` and `Reboot` execute one mutex-protected operation: load the saved profile, refuse an intentionally stopped bridge, stop the old runtime, start a new runtime, require Worker KV refresh in `cloudflare-worker` mode, verify the local/Quick Tunnel/stable Worker endpoint pairs, and report success only after every check reaches `200/401`.
+
+`On` starts from the saved profile and sets desired state to `running`. `Off` records desired state `stopped` before closing the runtime. A low-level `Stop` invoked accidentally leaves desired state `running`, so the external on-demand Reboot task can recover it. The scheduled task has no automatic trigger; it does not reopen the bridge by itself.
+
+Low-level runtime behavior remains:
 
 `Start` opens the local MCP service and the selected access path:
 - no tunnel: local service only
@@ -71,42 +88,46 @@ Important boundary: `Stop` is not the same as revoking OAuth. It closes reachabi
 
 For a no-reconfiguration workflow:
 1. Use a stable ChatGPT app URL, preferably a Worker/custom proxy or another stable external URL.
-2. Start/stop only the local bridge and current tunnel target.
-3. Refresh the proxy target after each `Start` if the upstream tunnel changed.
+2. Configure the controller once, then use `On`, `Off`, and `Reboot`.
+3. Let the controller refresh and verify the proxy target whenever the upstream tunnel changes.
 4. Keep the same ChatGPT app URL and OAuth state.
 
 Rules:
 
-- Before `Start`, confirm the project root and whether a public tunnel is acceptable.
+- Before controller `Configure`/`On`, confirm the project root and whether a public tunnel is acceptable.
 - Prefer Cloudflare Quick Tunnel for temporary tests; tell the user it is not stable or production-grade.
 - If the account has no Cloudflare DNS zone, prefer a stable Workers proxy on `workers.dev` plus a Quick Tunnel upstream. The ChatGPT app URL stays stable while Codex refreshes the Worker KV target after each start.
 - Prefer `-Tunnel external -PublicBaseUrl ...` when the user already has a stable tunnel; Quick Tunnel URLs change after restart and require updating the ChatGPT app URL.
 - For `-Tunnel cloudflare-worker`, ensure `%LOCALAPPDATA%\devspace-bridge\worker-proxy.json` contains `workerBaseUrl`, `kvNamespaceId`, and `kvKey`.
-- KV refresh is automatic when `%LOCALAPPDATA%\devspace-bridge\cf-api.json` exists with `{ "accountId": "...", "apiToken": "...", "kvNamespaceId": "..." }`. The token needs only account-scoped `Workers KV Storage: Edit`. With it, `Start` writes the new upstream to the `current` key over the REST API (`updateMode: rest-api`, `needsKvUpdate: false`) and needs no manual step or external plugin. The token is read locally and never printed; keep `cf-api.json` out of any repo. Without the file, `Start` degrades to the old manual flow (`needsKvUpdate: true`, `kvUpdateError` recorded in state).
+- For controller-driven restart, store the token with `set_cf_api_config.ps1`. It writes `%LOCALAPPDATA%\devspace-bridge\cf-api.protected.json` using Windows DPAPI `CurrentUser`; the token needs only account-scoped `Workers KV Storage: Edit`, is decrypted only in memory, and is never printed. Legacy plaintext `cf-api.json` remains readable for compatibility but should be migrated. Keep both files out of every repo.
+- Controller `On` and `Restart` use strict Worker KV mode. A missing or failed KV credential is an error, and a failed health gate is cleaned up instead of being reported as success. Direct low-level `Start` can still record `needsKvUpdate: true` for a manual browser-repair flow unless `-RequireWorkerKv` is supplied.
 - Never print `ownerToken` or Owner password. If ChatGPT authorization requires it, read it locally and fill it into the browser only after explicit user confirmation.
-- After `Stop`, verify no `@waishnav/devspace` or matching `cloudflared` process remains.
+- After controller `Off` (or a low-level recovery `Stop`), verify no managed `@waishnav/devspace` or matching `cloudflared` process remains.
 
 ## Setup Flow
 
-1. Run `Status`; if already running, reuse or stop/restart only when the root or tunnel URL is wrong.
-2. Run `Doctor`; fix missing Node/npm/Git Bash/cloudflared issues before touching ChatGPT UI.
-3. Run `Start` with the selected project root. Capture the returned `mcpUrl`.
-4. For Cloudflare Workers proxy mode, the KV `current` value is refreshed automatically when `cf-api.json` is present (see Rules). Confirm `state.workerProxy.needsKvUpdate` is `false`. If it is still `true` (no `cf-api.json`, or `kvUpdateError` set), refresh the KV `current` value manually with:
+1. Run controller `Status`; if a runtime is already healthy, reuse it.
+2. Run the low-level `Doctor` once to validate Node/npm/Git Bash/devspace/cloudflared prerequisites without opening a public tunnel.
+3. Run controller `Configure` with the exact project root, tunnel type, port, and stable public URL. Existing healthy runtime state may be imported when `-ProjectRoot` is omitted.
+4. In `cloudflare-worker` mode, create the minimum-scope token and store it with `set_cf_api_config.ps1 -Action Set`.
+5. Run controller `On`; capture the returned runtime `mcpUrl` and health evidence.
+6. Confirm `state.workerProxy.needsKvUpdate` is `false`. A manual low-level start may still require refreshing the KV `current` value with:
    - `upstream`: `state.workerProxy.upstream`
    - `publicBaseUrl`: `state.workerProxy.workerBaseUrl`
    - `updatedAt`: current ISO timestamp
    - `allowedHosts`: Worker host plus Quick Tunnel host
-5. Verify public reachability (or run `-Action Doctor`, which checks these once state exists):
+7. Verify public reachability with controller `Doctor`:
    - `/.well-known/oauth-protected-resource/mcp` should return `200`.
    - `/mcp` should return `401` before authorization.
-6. Use the Chrome skill to open ChatGPT settings:
+8. Optionally register the on-demand Reboot task after explicit user approval. Do not add an automatic trigger by default.
+9. Use the Chrome skill to open ChatGPT settings:
    - `Settings -> Apps -> Advanced settings`: ensure Developer mode is on.
    - `Apps -> Manage -> Create app`: create or update the app.
    - Name: concise project-agnostic name unless the user asks otherwise.
    - URL: the `mcpUrl`.
    - Auth: OAuth for local bridge.
-7. When ChatGPT asks to log in to local bridge, stop and request explicit permission before entering the Owner password.
-8. After authorization, run a read-only smoke test from ChatGPT first, then decide whether to allow edits.
+10. When ChatGPT asks to log in to local bridge, stop and request explicit permission before entering the Owner password.
+11. After authorization, run a read-only smoke test from ChatGPT first, then decide whether to allow edits.
 
 ## Routing Rules
 
@@ -149,16 +170,16 @@ What protects you (the one gate):
 - `local_bridge.ps1` generates `ownerToken` as 32 random bytes (256-bit). That is not brute-forceable, so a stranger hitting your URL just sees a password form they cannot pass. You are not wide open.
 
 The real risks:
-- **Always-on exposure.** While the bridge runs, `/authorize` and the OAuth endpoints face the whole internet (the Worker is an open reverse proxy with no auth of its own; auth is entirely devspace's job). The single most effective control is to keep the bridge **stopped except when actively using it**.
+- **Always-on exposure.** While the bridge runs, `/authorize` and the OAuth endpoints face the whole internet (the Worker is an open reverse proxy with no auth of its own; auth is entirely devspace's job). The single most effective control is to keep the bridge **off except when actively using it**.
 - **No rate-limit or lockout** on the password form. Safe only because `ownerToken` is high-entropy. Never replace it with a memorable `DEVSPACE_OAUTH_OWNER_TOKEN`. Optionally add a Cloudflare WAF rate-limit rule on `/authorize` and `/token`.
-- **Durable tokens; `Stop` does not revoke.** Issued bearer/refresh tokens live in memory and in `~/.devspace/oauth-state.json`. A previously authorized client, a leaked refresh token, or a stolen `~/.devspace/auth.json` keeps access across restarts. Use `-Action Rotate` to re-key (stop -> delete `oauth-state.json` -> mint a new `ownerToken`), then re-authorize your own ChatGPT. Optionally shorten `DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS`.
+- **Durable tokens; controller `Off` does not revoke.** Issued bearer/refresh tokens live in memory and in `~/.devspace/oauth-state.json`. A previously authorized client, a leaked refresh token, or a stolen `~/.devspace/auth.json` keeps access across restarts. Use low-level `-Action Rotate` to re-key (stop -> delete `oauth-state.json` -> mint a new `ownerToken`), then re-authorize your own ChatGPT. Optionally shorten `DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS` / `DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS`.
 - **Blast radius is the whole machine.** `run_shell` is not root-scoped and devspace has no read-only or no-shell mode (`DEVSPACE_TOOL_MODE=minimal` only swaps grep/ls for shell; it does not remove shell). So if someone does get in, they have local-user execution. Narrow `allowedRoots`, keep secrets out of reach, and for real isolation run the bridge under a least-privilege OS account or a disposable VM/container.
 
 Detection:
 - Tool calls are logged by default, and `Start` sets `DEVSPACE_LOG_SHELL_COMMANDS=true` so `run_shell` command text is written to `devspace.out.log`. After any worry, read that log for activity you did not initiate.
 
 Hardening checklist, by leverage:
-1. Stop when not in use (`-Action Stop`); shrinks the public window from days to minutes.
+1. Use controller `Off` when not in use; this records intentional shutdown and shrinks the public window from days to minutes.
 2. Keep `ownerToken` random (default); run `-Action Rotate` after any suspected exposure and periodically.
 3. Narrow the root; run under a least-privilege account or VM so a breach is not catastrophic.
 4. Optional: Cloudflare WAF rate-limit on `/authorize`, shorter token TTLs, or a Cloudflare Access policy in front (note the ChatGPT OAuth flow complicates a full Access gate).
@@ -168,10 +189,10 @@ Hardening checklist, by leverage:
 
 | Mistake | Correction |
 |---|---|
-| Leaving Quick Tunnel running after the task | Run `Stop` and verify status |
-| Leaving the bridge up between sessions | `Stop` when idle; the public window is your main attack surface |
+| Leaving Quick Tunnel running after the task | Run controller `Off` and verify status |
+| Leaving the bridge up between sessions | Use controller `Off` when idle; the public window is your main attack surface |
 | Suspected someone else connected | Run `Rotate` to revoke all tokens and re-key, then re-authorize |
-| Exposing the wrong root | Stop, rewrite local bridge config, restart, then reauthorize if needed |
+| Exposing the wrong root | Use `Off`, review and update the controller profile, then use `On`; reauthorize only if needed |
 | Letting ChatGPT directly edit without review | Require Codex verification before final claims |
 | Treating ChatGPT Pro output as proven | Ask for evidence, then validate locally |
 | Reusing an old Quick Tunnel URL | Run `Status`; restart if the process or URL is stale |
@@ -179,10 +200,8 @@ Hardening checklist, by leverage:
 
 ## Completion Checklist
 
-- Local bridge/tunnel state is known: running intentionally or stopped intentionally.
+- Local bridge/tunnel state is known: controller desired state is intentionally `running` or `stopped`.
 - The MCP URL and allowed root match the user's current task.
 - ChatGPT authorization was explicitly approved if performed.
 - Any ChatGPT-generated recommendation was locally verified before acting on it.
 - Final answer states whether the bridge remains running and how to stop it.
-
-

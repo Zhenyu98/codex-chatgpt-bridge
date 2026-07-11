@@ -12,7 +12,15 @@ param(
 
   [string]$PublicBaseUrl,
 
-  [switch]$InstallCloudflared
+  [switch]$InstallCloudflared,
+
+  [switch]$RequireWorkerKv,
+
+  [string]$OperationId,
+
+  [string]$StateDir = (Join-Path $env:LOCALAPPDATA "devspace-bridge"),
+
+  [switch]$DiscoverOrphans
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,16 +30,21 @@ try {
   # Non-console hosts may not expose OutputEncoding.
 }
 
-$StateDir = Join-Path $env:LOCALAPPDATA "devspace-bridge"
 $BinDir = Join-Path $StateDir "bin"
 $LogDir = Join-Path $StateDir "logs"
 $StatePath = Join-Path $StateDir "state.json"
 $WorkerProxyConfigPath = Join-Path $StateDir "worker-proxy.json"
 $CfApiConfigPath = Join-Path $StateDir "cf-api.json"
+$CfApiProtectedConfigPath = Join-Path $StateDir "cf-api.protected.json"
 $CloudflaredPath = Join-Path $BinDir "cloudflared.exe"
 $NpmBin = Join-Path $env:APPDATA "npm"
 $DevspaceCmd = Join-Path $NpmBin "devspace.cmd"
 $GitBashDir = "C:\Program Files\Git\bin"
+$RunId = if ($OperationId) {
+  [regex]::Replace($OperationId, "[^A-Za-z0-9_.-]", "_")
+} else {
+  (Get-Date).ToString("yyyyMMdd-HHmmss-fff")
+}
 
 function Ensure-Dirs {
   New-Item -ItemType Directory -Force -Path $StateDir, $BinDir, $LogDir | Out-Null
@@ -75,6 +88,29 @@ function Get-WorkerProxyConfig {
 }
 
 function Get-CfApiConfig {
+  if (Test-Path $CfApiProtectedConfigPath) {
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $protected = [System.IO.File]::ReadAllText($CfApiProtectedConfigPath, $utf8) | ConvertFrom-Json
+    if (-not $protected.accountId -or -not $protected.apiTokenProtected) {
+      throw "Invalid protected Cloudflare API config: $CfApiProtectedConfigPath"
+    }
+    $cipherBytes = [Convert]::FromBase64String([string]$protected.apiTokenProtected)
+    $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+      $cipherBytes,
+      $null,
+      [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    try {
+      return [pscustomobject]@{
+        accountId = [string]$protected.accountId
+        apiToken = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+        kvNamespaceId = [string]$protected.kvNamespaceId
+        source = "dpapi"
+      }
+    } finally {
+      [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+    }
+  }
   if (-not (Test-Path $CfApiConfigPath)) {
     return $null
   }
@@ -83,10 +119,11 @@ function Get-CfApiConfig {
 }
 
 # Writes the worker upstream pointer into Cloudflare Workers KV via the REST API
-# so a `cloudflare-worker` Start needs no manual/external KV refresh step. Requires
-# %LOCALAPPDATA%\devspace-bridge\cf-api.json = { accountId, apiToken[, kvNamespaceId] }
-# with an account-scoped token holding "Workers KV Storage: Edit". The token is never
-# printed. Returns { ok, reason } and never throws so Start can degrade gracefully.
+# so a `cloudflare-worker` Start needs no manual browser refresh. Prefer the DPAPI
+# `cf-api.protected.json` created by set_cf_api_config.ps1; legacy plaintext
+# `cf-api.json` remains a compatibility fallback. Use an account-scoped token holding
+# only "Workers KV Storage: Edit". The token is never printed. Returns { ok, reason }
+# and never throws so direct Start can degrade while controller Restart stays strict.
 function Update-WorkerKv([string]$nsId, [string]$key, [string]$valueJson) {
   $cfg = Get-CfApiConfig
   if (-not $cfg -or -not $cfg.accountId -or -not $cfg.apiToken) {
@@ -162,8 +199,7 @@ function Ensure-DevspaceConfig([string]$root, [string]$publicBaseUrl, [string[]]
 
 function Start-CloudflareTunnel {
   Ensure-Cloudflared
-  $logPath = Join-Path $LogDir "cloudflared.log"
-  Remove-Item -LiteralPath $logPath -ErrorAction SilentlyContinue
+  $logPath = Join-Path $LogDir "cloudflared-$RunId.log"
 
   $process = Start-Process -FilePath $CloudflaredPath `
     -ArgumentList @("tunnel", "--url", "http://127.0.0.1:$Port", "--logfile", $logPath, "--loglevel", "info") `
@@ -198,9 +234,8 @@ function Start-CloudflareTunnel {
 
 function Start-Devspace([string]$root, [string]$publicBaseUrl) {
   Ensure-Devspace
-  $outPath = Join-Path $LogDir "devspace.out.log"
-  $errPath = Join-Path $LogDir "devspace.err.log"
-  Remove-Item -LiteralPath $outPath, $errPath -ErrorAction SilentlyContinue
+  $outPath = Join-Path $LogDir "devspace-$RunId.out.log"
+  $errPath = Join-Path $LogDir "devspace-$RunId.err.log"
 
   $quote = { param([string]$value) "'" + $value.Replace("'", "''") + "'" }
   $childScript = @"
@@ -233,26 +268,34 @@ function Stop-Bridge {
   $state = Get-State
   $port = if ($state -and $state.port) { [int]$state.port } else { $Port }
   $stopped = @()
+  $skippedRecordedProcessIds = @()
 
   if ($state) {
-    foreach ($processId in @($state.devspaceProcessId, $state.tunnelProcessId)) {
-      if ($processId) {
-        $p = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if ($p) {
-          Stop-Process -Id $processId -Force
-          $stopped += $processId
-        }
+    $recorded = @(
+      [pscustomobject]@{ processId = $state.devspaceProcessId; pattern = '*@waishnav*devspace*' },
+      [pscustomobject]@{ processId = $state.tunnelProcessId; pattern = "*cloudflared*--url*127.0.0.1*$port*" }
+    )
+    foreach ($entry in $recorded) {
+      if (-not $entry.processId) { continue }
+      $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($entry.processId)" -ErrorAction SilentlyContinue
+      if ($processInfo -and $processInfo.CommandLine -like $entry.pattern) {
+        Stop-Process -Id $entry.processId -Force
+        $stopped += $entry.processId
+      } elseif ($processInfo) {
+        $skippedRecordedProcessIds += $entry.processId
       }
     }
   }
 
-  Get-CommandLineProcess '*@waishnav*devspace*' | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force
-    $stopped += $_.ProcessId
-  }
-  Get-CommandLineProcess "*cloudflared*--url*127.0.0.1*$port*" | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force
-    $stopped += $_.ProcessId
+  if ($DiscoverOrphans) {
+    Get-CommandLineProcess '*@waishnav*devspace*' | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force
+      $stopped += $_.ProcessId
+    }
+    Get-CommandLineProcess "*cloudflared*--url*127.0.0.1*$port*" | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force
+      $stopped += $_.ProcessId
+    }
   }
 
   if (Test-Path $StatePath) {
@@ -264,6 +307,8 @@ function Stop-Bridge {
     action = "Stop"
     port = $port
     stoppedProcessIds = @($stopped | Select-Object -Unique)
+    skippedRecordedProcessIds = @($skippedRecordedProcessIds | Select-Object -Unique)
+    orphanDiscoveryUsed = [bool]$DiscoverOrphans
     remainingDevspace = @(Get-CommandLineProcess '*@waishnav*devspace*')
     remainingTunnel = @(Get-CommandLineProcess "*cloudflared*--url*127.0.0.1*$port*")
   }
@@ -348,7 +393,16 @@ switch ($Action) {
   "Rotate" {
     # Panic button / re-key: lock out everyone who is or was connected.
     # 1) Stop the bridge so the devspace process drops all in-memory OAuth tokens.
-    $stop = Stop-Bridge
+    $previousDiscoverOrphans = $DiscoverOrphans
+    $DiscoverOrphans = $true
+    try {
+      $stop = Stop-Bridge
+    } finally {
+      $DiscoverOrphans = $previousDiscoverOrphans
+    }
+    if (@($stop.remainingDevspace).Count -gt 0 -or @($stop.remainingTunnel).Count -gt 0 -or @($stop.skippedRecordedProcessIds).Count -gt 0) {
+      throw "Rotate could not prove that every bridge and tunnel process stopped. OAuth material was not changed."
+    }
     # 2) Delete persisted tokens so previously issued bearer/refresh tokens die.
     $devspaceStateDir = Join-Path $HOME ".devspace"
     $oauthStatePath = Join-Path $devspaceStateDir "oauth-state.json"
@@ -373,19 +427,25 @@ switch ($Action) {
       stoppedProcessIds = $stop.stoppedProcessIds
       clearedPersistedTokens = $clearedPersistedTokens
       ownerTokenPath = $authPath
-      note = "New Owner password written (not shown). All previous authorizations are revoked. Run Start, then re-authorize ChatGPT by reading the new token from auth.json into the approval form."
+      note = "New Owner password written (not shown). All previous authorizations are revoked. Use controller On, then re-authorize ChatGPT by reading the new token from auth.json into the approval form."
     })
     break
   }
   "Start" {
+    $existingDevspace = @(Get-CommandLineProcess '*@waishnav*devspace*')
+    $existingTunnel = @(Get-CommandLineProcess "*cloudflared*--url*127.0.0.1*$Port*")
+    if ($existingDevspace.Count -gt 0 -or $existingTunnel.Count -gt 0 -or (Test-PortListening $Port)) {
+      throw "Bridge processes or port $Port are already active. Use the controller Restart/Reboot action instead of starting a duplicate instance."
+    }
+
     $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-    $allowedHosts = @()
-    $workerProxy = $null
-    if ($Tunnel -eq "cloudflare") {
-      $tunnelInfo = Start-CloudflareTunnel
-      $publicBaseUrl = $tunnelInfo.publicUrl
-    } elseif ($Tunnel -eq "cloudflare-worker") {
-      $tunnelInfo = Start-CloudflareTunnel
+    Ensure-Devspace
+    if ($Tunnel -in @("cloudflare", "cloudflare-worker")) {
+      Ensure-Cloudflared
+    }
+
+    $proxyConfig = $null
+    if ($Tunnel -eq "cloudflare-worker") {
       $proxyConfig = Get-WorkerProxyConfig
       if (-not $PublicBaseUrl -and $proxyConfig -and $proxyConfig.workerBaseUrl) {
         $PublicBaseUrl = $proxyConfig.workerBaseUrl
@@ -393,65 +453,106 @@ switch ($Action) {
       if (-not $PublicBaseUrl) {
         throw "-Tunnel cloudflare-worker requires -PublicBaseUrl or $WorkerProxyConfigPath with workerBaseUrl."
       }
-      $publicBaseUrl = $PublicBaseUrl.TrimEnd("/")
-      $allowedHosts = @(([uri]$publicBaseUrl).Host, ([uri]$tunnelInfo.publicUrl).Host)
-      $workerProxy = [ordered]@{
-        workerBaseUrl = $publicBaseUrl
-        upstream = $tunnelInfo.publicUrl
-        kvNamespaceId = if ($proxyConfig) { $proxyConfig.kvNamespaceId } else { $null }
-        kvKey = if ($proxyConfig -and $proxyConfig.kvKey) { $proxyConfig.kvKey } else { "current" }
-        updateMode = "codex-cloudflare-plugin"
-        needsKvUpdate = $true
+      if (-not $proxyConfig -or -not $proxyConfig.kvNamespaceId) {
+        throw "cloudflare-worker requires $WorkerProxyConfigPath with kvNamespaceId."
       }
-    } elseif ($Tunnel -eq "external") {
-      if (-not $PublicBaseUrl) {
-        throw "-Tunnel external requires -PublicBaseUrl https://..."
+      if ($RequireWorkerKv) {
+        $cfPreflight = Get-CfApiConfig
+        if (-not $cfPreflight -or -not $cfPreflight.accountId -or -not $cfPreflight.apiToken) {
+          throw "Strict Worker KV mode requires a valid DPAPI or legacy Cloudflare API configuration."
+        }
+        if ($cfPreflight.kvNamespaceId -and
+            -not ([string]$cfPreflight.kvNamespaceId).Equals([string]$proxyConfig.kvNamespaceId, [System.StringComparison]::OrdinalIgnoreCase)) {
+          throw "Cloudflare credential metadata and worker-proxy.json reference different KV namespaces. Run set_cf_api_config.ps1 -Action Set again."
+        }
+        $cfPreflight = $null
       }
-      $tunnelInfo = $null
-      $publicBaseUrl = $PublicBaseUrl.TrimEnd("/")
-    } else {
-      $tunnelInfo = $null
-      $publicBaseUrl = "http://127.0.0.1:$Port"
+    }
+    if ($Tunnel -eq "external" -and -not $PublicBaseUrl) {
+      throw "-Tunnel external requires -PublicBaseUrl https://..."
     }
 
-    Ensure-DevspaceConfig -root $resolvedRoot -publicBaseUrl $publicBaseUrl -allowedHosts $allowedHosts
-    $devspaceInfo = Start-Devspace -root $resolvedRoot -publicBaseUrl $publicBaseUrl
-
-    if ($Tunnel -eq "cloudflare-worker" -and $workerProxy) {
-      $kvValueJson = [ordered]@{
-        upstream = $workerProxy.upstream
-        publicBaseUrl = $workerProxy.workerBaseUrl
-        updatedAt = (Get-Date).ToString("o")
-        allowedHosts = $allowedHosts
-      } | ConvertTo-Json -Depth 8 -Compress
-      $kvResult = Update-WorkerKv -nsId $workerProxy.kvNamespaceId -key $workerProxy.kvKey -valueJson $kvValueJson
-      if ($kvResult.ok) {
-        $workerProxy.updateMode = "rest-api"
-        $workerProxy.needsKvUpdate = $false
-        $workerProxy.kvUpdatedAt = (Get-Date).ToString("o")
+    $allowedHosts = @()
+    $workerProxy = $null
+    $tunnelInfo = $null
+    $devspaceInfo = $null
+    try {
+      if ($Tunnel -eq "cloudflare") {
+        $tunnelInfo = Start-CloudflareTunnel
+        $publicBaseUrl = $tunnelInfo.publicUrl
+      } elseif ($Tunnel -eq "cloudflare-worker") {
+        $tunnelInfo = Start-CloudflareTunnel
+        $publicBaseUrl = $PublicBaseUrl.TrimEnd("/")
+        $allowedHosts = @(([uri]$publicBaseUrl).Host, ([uri]$tunnelInfo.publicUrl).Host)
+        $workerProxy = [ordered]@{
+          workerBaseUrl = $publicBaseUrl
+          upstream = $tunnelInfo.publicUrl
+          kvNamespaceId = $proxyConfig.kvNamespaceId
+          kvKey = if ($proxyConfig.kvKey) { $proxyConfig.kvKey } else { "current" }
+          updateMode = "manual-pending"
+          needsKvUpdate = $true
+        }
+      } elseif ($Tunnel -eq "external") {
+        $publicBaseUrl = $PublicBaseUrl.TrimEnd("/")
       } else {
-        $workerProxy.kvUpdateError = $kvResult.reason
+        $publicBaseUrl = "http://127.0.0.1:$Port"
       }
-    }
 
-    $state = [ordered]@{
-      startedAt = (Get-Date).ToString("o")
-      projectRoot = $resolvedRoot
-      tunnel = $Tunnel
-      port = $Port
-      publicBaseUrl = $publicBaseUrl
-      mcpUrl = "$publicBaseUrl/mcp"
-      devspaceProcessId = $devspaceInfo.processId
-      tunnelProcessId = if ($tunnelInfo) { $tunnelInfo.processId } else { $null }
-      workerProxy = $workerProxy
-      logs = [ordered]@{
-        devspaceStdout = $devspaceInfo.stdoutPath
-        devspaceStderr = $devspaceInfo.stderrPath
-        tunnel = if ($tunnelInfo) { $tunnelInfo.logPath } else { $null }
+      Ensure-DevspaceConfig -root $resolvedRoot -publicBaseUrl $publicBaseUrl -allowedHosts $allowedHosts
+      $devspaceInfo = Start-Devspace -root $resolvedRoot -publicBaseUrl $publicBaseUrl
+
+      if ($Tunnel -eq "cloudflare-worker" -and $workerProxy) {
+        $kvValueJson = [ordered]@{
+          upstream = $workerProxy.upstream
+          publicBaseUrl = $workerProxy.workerBaseUrl
+          updatedAt = (Get-Date).ToString("o")
+          allowedHosts = $allowedHosts
+        } | ConvertTo-Json -Depth 8 -Compress
+        $kvResult = Update-WorkerKv -nsId $workerProxy.kvNamespaceId -key $workerProxy.kvKey -valueJson $kvValueJson
+        if ($kvResult.ok) {
+          $workerProxy.updateMode = "rest-api"
+          $workerProxy.needsKvUpdate = $false
+          $workerProxy.kvUpdatedAt = (Get-Date).ToString("o")
+        } else {
+          $workerProxy.kvUpdateError = $kvResult.reason
+          if ($RequireWorkerKv) {
+            throw "Cloudflare Worker KV refresh is required but failed: $($kvResult.reason)"
+          }
+        }
       }
+
+      $state = [ordered]@{
+        startedAt = (Get-Date).ToString("o")
+        operationId = $RunId
+        projectRoot = $resolvedRoot
+        tunnel = $Tunnel
+        port = $Port
+        publicBaseUrl = $publicBaseUrl
+        mcpUrl = "$publicBaseUrl/mcp"
+        devspaceProcessId = $devspaceInfo.processId
+        tunnelProcessId = if ($tunnelInfo) { $tunnelInfo.processId } else { $null }
+        workerProxy = $workerProxy
+        logs = [ordered]@{
+          devspaceStdout = $devspaceInfo.stdoutPath
+          devspaceStderr = $devspaceInfo.stderrPath
+          tunnel = if ($tunnelInfo) { $tunnelInfo.logPath } else { $null }
+        }
+      }
+      Save-State $state
+      Write-Json $state
+    } catch {
+      foreach ($processId in @(
+        $(if ($devspaceInfo) { $devspaceInfo.processId }),
+        $(if ($tunnelInfo) { $tunnelInfo.processId })
+      )) {
+        if ($processId) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
+      }
+      $savedState = Get-State
+      if ($savedState -and $savedState.operationId -eq $RunId -and (Test-Path -LiteralPath $StatePath)) {
+        Remove-Item -LiteralPath $StatePath -Force
+      }
+      throw
     }
-    Save-State $state
-    Write-Json $state
     break
   }
 }
