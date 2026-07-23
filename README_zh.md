@@ -135,6 +135,14 @@ powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectR
 
 `Configure` 只保存项目路径、端口、隧道模式和稳定 URL，不保存 token。
 
+需要授权多个明确目录时，`ProjectRoot` 仍作为默认工作目录，并通过分号分隔的 `AllowedRoots` 列出其他目录；`ProjectRoot` 必须位于其中一个 root 内：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectRoot "C:\Users\you\DevSpace" -AllowedRoots "C:\Users\you\DevSpace;D:\Projects;E:\Reference" -Tunnel cloudflare-worker -PublicBaseUrl https://bridge.example.workers.dev
+```
+
+controller 会用 profile schema v2 保存该列表，并在后续 `On`、`Restart`、`Reboot` 中持续传给 DevSpace，不会退回成单一 root。
+
 ### 2. Worker 模式先保存 KV 凭据
 
 如果使用 `cloudflare-worker`，第一次 `On` 前用最小权限 Cloudflare token 配置自动 KV 刷新：
@@ -143,7 +151,11 @@ powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectR
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\set_cf_api_config.ps1" -Action Set -AccountId <account-id> -KvNamespaceId <namespace-id>
 ```
 
-脚本会安全提示输入 token，并用 Windows DPAPI `CurrentUser` 加密保存在 `%LOCALAPPDATA%\devspace-bridge`，不会把 token 放进命令行或输出。DPAPI 只保护静态文件；同一 Windows 用户下运行的桥、controller 和 `run_shell` 仍共享该用户权限，所以它不是权限隔离边界。
+脚本会安全提示输入 token，并用 Windows DPAPI `CurrentUser` 加密保存在 `%LOCALAPPDATA%\devspace-bridge`，不会把 token 放进命令行或输出。保存前会验证一次 DPAPI 加密/解密闭环；成功迁移后会清除旧的明文 `cf-api.json`，controller 也会拒绝使用遗留明文凭据。DPAPI 只保护静态文件；同一 Windows 用户下运行的桥、controller 和 `run_shell` 仍共享该用户权限，所以它不是权限隔离边界。
+
+使用 `-InstallCloudflared` 自动下载时，脚本会先验证 Windows Authenticode 签名有效且签名方为 Cloudflare, Inc.，验证失败不会安装或运行该文件。
+
+稳定 Worker 与 external 模式的公网 base URL 必须使用 HTTPS，且不能嵌入账号密码、查询参数或 fragment。
 
 凭据脚本会读取刚保存的 controller profile，把稳定 Worker URL 和 KV namespace 同步到不含认证凭据、但仍应留在本机且不得提交的 `worker-proxy.json`。独立配置时也可以显式传 `-WorkerBaseUrl`。
 
@@ -161,6 +173,7 @@ powershell -ExecutionPolicy Bypass -File $controller -Action Doctor
 - `Off` 先记录“有意停止”，再关闭本地 MCP 与 tunnel；保留 ChatGPT app、OAuth 和 profile，所以下次 `On` 不需要重建 app。
 - `Restart` 与 `Reboot` 是同一个加互斥锁的完整事务：停 → 启 → Worker KV 刷新 → 健康检查。它不是两个可被分别执行的命令。
 - `Off` 后执行 `Reboot` 会被拒绝，避免外部任务误把你有意关闭的桥重新打开；需要恢复时明确执行 `On`。
+- 停止与重启只会清理当前配置端口上的 DevSpace 和对应 tunnel。若该端口属于无关程序，脚本会保留它并报告冲突，不会误杀。
 - `Status` 和日志不含 token，但会包含本机路径、PID、日志路径和 tunnel URL；分享截图或诊断前请脱敏。
 
 ### 4. 可选的独立重启入口
@@ -361,8 +374,10 @@ ChatGPT 会打开授权页面。
 
 - **不用时就用 controller `Off`**——常驻的公网端点是主要攻击面。
 - root 要窄、不含密钥；要更强隔离就跑在最小权限账号或一次性 VM 里。
+- 查看 controller `Doctor.securityWarnings`；磁盘根目录、完整用户目录及其父目录会被标记为范围过宽。
 - 一旦怀疑别人连上，跑 `-Action Rotate` 吊销所有 token 并改锁。
 - controller 状态和日志包含路径、PID 与 tunnel URL，分享前先脱敏。
+- shell 命令日志默认关闭，避免无意持久化敏感参数；确实需要审计轨迹时，再设置用户级环境变量 `DEVSPACE_LOG_SHELL_COMMANDS=true`。
 
 ## 面向 Agent 用户
 

@@ -113,7 +113,19 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\set_cf_api_config.ps1" 
 powershell -ExecutionPolicy Bypass -File $controller -Action On
 ```
 
+To keep one default working directory while authorizing several explicit file roots, add a semicolon-separated list. `ProjectRoot` must be inside one of the allowed roots:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectRoot "C:\Users\you\DevSpace" -AllowedRoots "C:\Users\you\DevSpace;D:\Projects;E:\Reference" -Tunnel cloudflare-worker -PublicBaseUrl https://bridge.example.workers.dev
+```
+
+The controller stores the list in profile schema v2 and forwards it to DevSpace on every `On` or `Restart`, so later configuration runs do not collapse access back to one root.
+
 The credential helper reads the saved Worker URL from the controller profile and writes the matching non-credential operational metadata to `worker-proxy.json` alongside the DPAPI-protected credential. The file still contains your Worker URL and KV namespace ID: keep it local and out of git. You can override the URL explicitly with `-WorkerBaseUrl` for a standalone setup.
+
+The helper verifies a DPAPI encrypt/decrypt round trip before saving and removes an older plaintext `cf-api.json` after a successful migration. Controller-driven `On` / `Reboot` refuses plaintext legacy credentials. If `-InstallCloudflared` downloads the tunnel binary, the bridge verifies a valid Windows Authenticode signature from Cloudflare, Inc. before installing or running it.
+
+Stable Worker and external public base URLs must use HTTPS and cannot contain embedded credentials, a query string, or a fragment.
 
 The optional scheduled task is an external, on-demand recovery entrypoint. It has no automatic trigger and always calls the single `Reboot` transaction:
 
@@ -136,8 +148,11 @@ Practical rules:
 
 - Use controller `Off` when the bridge is idle — the always-on public endpoint is the main attack surface.
 - Keep the root narrow and free of secrets; for stronger isolation, run under a least-privilege OS account or a disposable VM.
+- Review controller `Doctor.securityWarnings`; drive roots, the full user profile, and ancestors of the user profile are flagged as overly broad.
 - If you suspect someone else connected, run `-Action Rotate` to revoke all tokens and re-key.
 - Controller state and logs contain local paths, PIDs, and tunnel URLs. Redact them before sharing screenshots or diagnostics.
+- Stop and restart operations identify DevSpace by the configured listening port. An unrelated process on that port is reported and preserved; recovery fails instead of killing it.
+- Shell-command logging defaults to disabled to reduce accidental secret retention. Set the user-level `DEVSPACE_LOG_SHELL_COMMANDS=true` only when you explicitly need an audit trail.
 
 ## FAQ
 

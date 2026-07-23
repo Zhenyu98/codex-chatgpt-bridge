@@ -46,6 +46,8 @@ powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\restart_task.ps1 -A
 powershell -ExecutionPolicy Bypass -File <skill-dir>\scripts\local_bridge.ps1 -Action Rotate
 ```
 
+For multiple explicit file-tool roots, keep `-ProjectRoot` as the default working directory and add `-AllowedRoots "<root1>;<root2>"`. The controller persists this list in profile schema v2 and reuses it on later configuration and lifecycle operations.
+
 The credential helper derives `worker-proxy.json` from the saved `cloudflare-worker` profile, so the required order on a fresh setup is `Configure` -> `set_cf_api_config Set` -> `On`. The scheduled task `Run` command is asynchronous; verify `%LOCALAPPDATA%\devspace-bridge\controller-result.json` and controller `Doctor` before reporting success.
 
 ## Switch Semantics
@@ -99,7 +101,12 @@ Rules:
 - If the account has no Cloudflare DNS zone, prefer a stable Workers proxy on `workers.dev` plus a Quick Tunnel upstream. The ChatGPT app URL stays stable while Codex refreshes the Worker KV target after each start.
 - Prefer `-Tunnel external -PublicBaseUrl ...` when the user already has a stable tunnel; Quick Tunnel URLs change after restart and require updating the ChatGPT app URL.
 - For `-Tunnel cloudflare-worker`, ensure `%LOCALAPPDATA%\devspace-bridge\worker-proxy.json` contains `workerBaseUrl`, `kvNamespaceId`, and `kvKey`.
-- For controller-driven restart, store the token with `set_cf_api_config.ps1`. It writes `%LOCALAPPDATA%\devspace-bridge\cf-api.protected.json` using Windows DPAPI `CurrentUser`; the token needs only account-scoped `Workers KV Storage: Edit`, is decrypted only in memory, and is never printed. Legacy plaintext `cf-api.json` remains readable for compatibility but should be migrated. Keep both files out of every repo.
+- For controller-driven restart, store the token with `set_cf_api_config.ps1`. It writes `%LOCALAPPDATA%\devspace-bridge\cf-api.protected.json` using Windows DPAPI `CurrentUser`; the token needs only account-scoped `Workers KV Storage: Edit`, is decrypted only in memory, and is never printed. The helper verifies a DPAPI round trip, removes a migrated plaintext `cf-api.json`, and controller `On` / `Reboot` refuses plaintext legacy credentials. Keep every credential and state file out of every repo.
+- `-InstallCloudflared` verifies a valid Windows Authenticode signature from Cloudflare, Inc. before installing or running the downloaded executable.
+- Stable Worker and external public base URLs must be absolute HTTPS URLs without embedded credentials, query strings, or fragments.
+- Low-level `Stop` discovers only DevSpace listening on the configured port plus the matching cloudflared tunnel. It reports and preserves unrelated port owners.
+- Controller `Doctor.securityWarnings` flags drive-root, full-user-profile, and user-profile-ancestor allowed roots without silently changing the user's configured scope.
+- Shell-command logging defaults to disabled. Set the user-level `DEVSPACE_LOG_SHELL_COMMANDS=true` only when a local command audit trail is explicitly required.
 - Controller `On` and `Restart` use strict Worker KV mode. A missing or failed KV credential is an error, and a failed health gate is cleaned up instead of being reported as success. Direct low-level `Start` can still record `needsKvUpdate: true` for a manual browser-repair flow unless `-RequireWorkerKv` is supplied.
 - Never print `ownerToken` or Owner password. If ChatGPT authorization requires it, read it locally and fill it into the browser only after explicit user confirmation.
 - After controller `Off` (or a low-level recovery `Stop`), verify no managed `@waishnav/devspace` or matching `cloudflared` process remains.

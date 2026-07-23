@@ -74,12 +74,13 @@ powershell -ExecutionPolicy Bypass -File $controller -Action Configure -ProjectR
 
 Controller semantics:
 
-- `Configure` saves the project root, tunnel mode, port, and stable public URL without storing secrets.
+- `Configure` saves the default project root, explicit file-tool roots, tunnel mode, port, and stable public URL without storing secrets. Use `-AllowedRoots "<root1>;<root2>"` for multiple roots; `ProjectRoot` must be inside one of them.
 - `On` records intentional running state, starts the bridge, refreshes Worker KV when required, and verifies the `200/401` health contract.
 - `Off` records intentional stopped state, closes the runtime, and preserves the profile and ChatGPT app authorization.
 - `Restart` and `Reboot` are the same single transaction. They refuse to reopen a bridge intentionally turned off with `Off`; use `On` first.
+- Stop/restart cleanup is scoped to the configured listener port. If an unrelated process owns that port, preserve it and fail with a conflict instead of killing it.
 - `Status` reports controller, desired, and runtime state without exposing credentials. It still contains local paths, PIDs, log paths, and tunnel URLs; redact it before sharing.
-- `Doctor` returns a non-zero exit code when the bridge is unhealthy.
+- `Doctor` returns a non-zero exit code when the bridge is unhealthy and reports security warnings for drive-root or user-profile-wide allowed roots.
 - `Rotate` is the panic button: it stops the bridge, deletes persisted OAuth tokens (`~/.devspace/oauth-state.json`), and mints a new Owner password, so anyone who is or was connected is locked out. Use it after any suspected unauthorized access; then use `On` and re-authorize ChatGPT. See the threat-model section in `references/bridge-operations.md`.
 - `Off` intentionally preserves ChatGPT app configuration, local bridge config, and authorization material so the next `On` can reuse the same ChatGPT app without recreating or reauthorizing.
 - This is a safety switch, not an OAuth revoke. ChatGPT keeps the app connection record, but with the local service and tunnel stopped it cannot reach the workspace.
@@ -92,6 +93,8 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\set_cf_api_config.ps1" 
 ```
 
 DPAPI protects the token at rest. A bridge and controller running as the same Windows user still share that user's authority, so DPAPI alone does not isolate an authorized `run_shell`.
+
+The credential helper verifies a DPAPI round trip before writing, removes migrated plaintext `cf-api.json`, and controller-driven `On` / `Reboot` refuses legacy plaintext credentials. Automatic cloudflared installation must pass a valid Windows Authenticode signature check for Cloudflare, Inc. Shell-command logging defaults to disabled; enable `DEVSPACE_LOG_SHELL_COMMANDS=true` only when the user explicitly wants that local audit trail.
 
 When the saved profile uses `cloudflare-worker`, the credential helper also creates or synchronizes local-only, non-credential `worker-proxy.json` metadata from the profile's stable URL and the supplied KV namespace. It still identifies deployment resources, so keep it out of git. Run `Configure` first, then the credential helper, then `On`.
 

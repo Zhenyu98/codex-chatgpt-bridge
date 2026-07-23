@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A Codex skill package for safer coding handoffs, verified bridge restarts, and scoped local ChatGPT access.",
   "skills": [
     "skills/codex-chatgpt-bridge"
