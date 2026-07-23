@@ -318,7 +318,8 @@ function Assert-ProfileReady($profile) {
     throw "Configured port must be between 1 and 65535."
   }
   $profileRoots = @(Get-ProfileAllowedRoots $profile)
-  $resolvedRoots = @(Resolve-AllowedRootPaths $profileRoots ([string]$profile.projectRoot))
+  # Validate/normalize allowed roots; discard result — Assert only needs throw-on-invalid.
+  $null = @(Resolve-AllowedRootPaths $profileRoots ([string]$profile.projectRoot))
   if ($profile.tunnel -in @("cloudflare-worker", "external") -and -not (Test-AbsoluteHttpsUrl ([string]$profile.publicBaseUrl))) {
     throw "$($profile.tunnel) publicBaseUrl must be an absolute HTTPS URL without credentials, query, or fragment."
   }

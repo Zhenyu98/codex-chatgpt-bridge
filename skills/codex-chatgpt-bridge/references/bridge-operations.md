@@ -183,7 +183,7 @@ The real risks:
 - **Blast radius is the whole machine.** `run_shell` is not root-scoped and devspace has no read-only or no-shell mode (`DEVSPACE_TOOL_MODE=minimal` only swaps grep/ls for shell; it does not remove shell). So if someone does get in, they have local-user execution. Narrow `allowedRoots`, keep secrets out of reach, and for real isolation run the bridge under a least-privilege OS account or a disposable VM/container.
 
 Detection:
-- Tool calls are logged by default, and `Start` sets `DEVSPACE_LOG_SHELL_COMMANDS=true` so `run_shell` command text is written to `devspace.out.log`. After any worry, read that log for activity you did not initiate.
+- Tool calls may still appear in process logs, but shell-command text is **not** logged by default. `Start` no longer forces `DEVSPACE_LOG_SHELL_COMMANDS=true`; operators must set the user-level `DEVSPACE_LOG_SHELL_COMMANDS=true` to write `run_shell` command text to `devspace.out.log`. After any worry, read that log only if the opt-in was enabled; otherwise use controller/status events and process inventory rather than assuming a command audit trail exists.
 
 Hardening checklist, by leverage:
 1. Use controller `Off` when not in use; this records intentional shutdown and shrinks the public window from days to minutes.
