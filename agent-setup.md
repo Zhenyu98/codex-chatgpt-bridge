@@ -23,7 +23,7 @@ and the verification result.
 - Windows + PowerShell, with Codex installed / 已安装 Codex
 - Node.js + npm (for the `@waishnav/devspace` bridge CLI) / 桥的底层 CLI 需要
 - A ChatGPT account with Developer mode — only if you will actually connect ChatGPT / 仅在真正连 ChatGPT 时需要
-- Optional: `cloudflared` (the script can auto-download it) / 可选，脚本可自动下载
+- Optional: `cloudflared` (the script can auto-download it and verifies Cloudflare's Windows Authenticode signature) / 可选，脚本可自动下载并验证 Cloudflare 的 Windows Authenticode 签名
 - Optional: a stable Cloudflare Worker plus a minimum-scope KV token, only for automatic
   stable-upstream refresh / 可选，仅稳定 Worker 自动刷新 upstream 时需要最小权限 KV token
 

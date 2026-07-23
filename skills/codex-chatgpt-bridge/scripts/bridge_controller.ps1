@@ -5,9 +5,13 @@ param(
 
   [string]$ProjectRoot,
 
+  # Semicolon-separated paths. ProjectRoot remains the default working directory.
+  [string]$AllowedRoots,
+
   [ValidateSet("none", "cloudflare", "external", "cloudflare-worker")]
   [string]$Tunnel,
 
+  [ValidateRange(1, 65535)]
   [int]$Port,
 
   [string]$PublicBaseUrl,
@@ -118,8 +122,11 @@ function Write-ControllerResult([string]$status, [string]$stage, [string]$messag
 }
 
 function Get-CfApiMode {
-  if (Test-Path -LiteralPath $CfApiProtectedConfigPath) { return "dpapi" }
-  if (Test-Path -LiteralPath $CfApiConfigPath) { return "plaintext-legacy" }
+  $protectedPresent = Test-Path -LiteralPath $CfApiProtectedConfigPath
+  $legacyPresent = Test-Path -LiteralPath $CfApiConfigPath
+  if ($protectedPresent -and $legacyPresent) { return "dpapi-with-plaintext-legacy" }
+  if ($protectedPresent) { return "dpapi" }
+  if ($legacyPresent) { return "plaintext-legacy" }
   return "missing"
 }
 
@@ -127,7 +134,73 @@ function Test-AbsoluteHttpsUrl([string]$url) {
   if (-not $url) { return $false }
   $parsed = $null
   if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsed)) { return $false }
-  return ($parsed.Scheme -eq "https" -and -not [string]::IsNullOrWhiteSpace($parsed.Host))
+  return (
+    $parsed.Scheme -eq "https" -and
+    -not [string]::IsNullOrWhiteSpace($parsed.Host) -and
+    [string]::IsNullOrWhiteSpace($parsed.UserInfo) -and
+    [string]::IsNullOrWhiteSpace($parsed.Query) -and
+    [string]::IsNullOrWhiteSpace($parsed.Fragment)
+  )
+}
+
+function Test-PathWithinRoot([string]$path, [string]$root) {
+  $fullPath = [System.IO.Path]::GetFullPath($path).TrimEnd("\", "/")
+  $fullRoot = [System.IO.Path]::GetFullPath($root).TrimEnd("\", "/")
+  if ($fullPath.Equals($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  return $fullPath.StartsWith($fullRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-AllowedRootPaths([object[]]$candidates, [string]$projectRoot) {
+  $resolved = @()
+  $seen = @{}
+  foreach ($candidate in @($candidates)) {
+    $value = ([string]$candidate).Trim()
+    if (-not $value) { continue }
+    $item = Get-Item -LiteralPath (Resolve-Path -LiteralPath $value).Path
+    if (-not $item.PSIsContainer) { throw "Configured allowed root is not a directory: $value" }
+    if (-not $seen.ContainsKey($item.FullName)) {
+      $seen[$item.FullName] = $true
+      $resolved += $item.FullName
+    }
+  }
+  if ($resolved.Count -eq 0) { throw "At least one allowed root is required." }
+  if (@($resolved | Where-Object { Test-PathWithinRoot $projectRoot $_ }).Count -eq 0) {
+    throw "ProjectRoot must be inside one of the configured allowed roots."
+  }
+  return @($resolved)
+}
+
+function Get-ProfileAllowedRoots($profile) {
+  if ($profile -and $profile.allowedRoots -and @($profile.allowedRoots).Count -gt 0) {
+    return @($profile.allowedRoots | ForEach-Object { [string]$_ })
+  }
+  if ($profile -and $profile.projectRoot) { return @([string]$profile.projectRoot) }
+  return @()
+}
+
+function Test-RootSetsEqual([object[]]$left, [object[]]$right) {
+  $leftNormalized = @($left | ForEach-Object { [System.IO.Path]::GetFullPath([string]$_).TrimEnd("\", "/").ToLowerInvariant() } | Sort-Object -Unique)
+  $rightNormalized = @($right | ForEach-Object { [System.IO.Path]::GetFullPath([string]$_).TrimEnd("\", "/").ToLowerInvariant() } | Sort-Object -Unique)
+  if ($leftNormalized.Count -ne $rightNormalized.Count) { return $false }
+  return (($leftNormalized -join "`n") -eq ($rightNormalized -join "`n"))
+}
+
+function Get-ProfileSecurityWarnings($profile) {
+  $warnings = @()
+  if (-not $profile) { return $warnings }
+  $homePath = [System.IO.Path]::GetFullPath($HOME).TrimEnd("\", "/")
+  foreach ($root in @(Get-ProfileAllowedRoots $profile)) {
+    $fullRoot = [System.IO.Path]::GetFullPath([string]$root).TrimEnd("\", "/")
+    $driveRoot = [System.IO.Path]::GetPathRoot($fullRoot).TrimEnd("\", "/")
+    if ($fullRoot.Equals($driveRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $warnings += "allowed-root-is-drive-root:$fullRoot"
+    } elseif ($fullRoot.Equals($homePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $warnings += "allowed-root-is-user-profile:$fullRoot"
+    } elseif (Test-PathWithinRoot $homePath $fullRoot) {
+      $warnings += "allowed-root-contains-user-profile:$fullRoot"
+    }
+  }
+  return @($warnings)
 }
 
 function Set-DesiredState([string]$state, [string]$reason) {
@@ -241,6 +314,15 @@ function Assert-ProfileReady($profile) {
   if (-not $profile.projectRoot -or -not (Test-Path -LiteralPath ([string]$profile.projectRoot))) {
     throw "Configured project root is missing: $($profile.projectRoot)"
   }
+  if ([int]$profile.port -lt 1 -or [int]$profile.port -gt 65535) {
+    throw "Configured port must be between 1 and 65535."
+  }
+  $profileRoots = @(Get-ProfileAllowedRoots $profile)
+  # Validate/normalize allowed roots; discard result — Assert only needs throw-on-invalid.
+  $null = @(Resolve-AllowedRootPaths $profileRoots ([string]$profile.projectRoot))
+  if ($profile.tunnel -in @("cloudflare-worker", "external") -and -not (Test-AbsoluteHttpsUrl ([string]$profile.publicBaseUrl))) {
+    throw "$($profile.tunnel) publicBaseUrl must be an absolute HTTPS URL without credentials, query, or fragment."
+  }
   if ($profile.tunnel -eq "cloudflare-worker") {
     $proxy = Get-JsonFile $WorkerProxyConfigPath
     if (-not $proxy -or -not $proxy.workerBaseUrl -or -not $proxy.kvNamespaceId) {
@@ -254,8 +336,12 @@ function Assert-ProfileReady($profile) {
     if (-not $profileBase.Equals($proxyBase, [System.StringComparison]::OrdinalIgnoreCase)) {
       throw "Controller profile publicBaseUrl does not match worker-proxy.json; refusing to change the stable ChatGPT app URL."
     }
-    if ((Get-CfApiMode) -eq "missing") {
+    $cfApiMode = Get-CfApiMode
+    if ($cfApiMode -eq "missing") {
       throw "Automatic restart requires a Cloudflare KV credential. Run set_cf_api_config.ps1 -Action Set first."
+    }
+    if ($cfApiMode -in @("plaintext-legacy", "dpapi-with-plaintext-legacy")) {
+      throw "Automatic restart refuses legacy plaintext cf-api.json. Run set_cf_api_config.ps1 -Action Set to migrate the token to Windows DPAPI, then remove the plaintext file."
     }
   }
 }
@@ -263,6 +349,7 @@ function Assert-ProfileReady($profile) {
 function Test-RuntimeMatchesProfile($runtime, $profile) {
   if (-not $runtime -or -not $profile) { return $false }
   if ($runtime.projectRoot -ne $profile.projectRoot) { return $false }
+  if (-not (Test-RootSetsEqual @(Get-ProfileAllowedRoots $runtime) @(Get-ProfileAllowedRoots $profile))) { return $false }
   if ($runtime.tunnel -ne $profile.tunnel) { return $false }
   if ([int]$runtime.port -ne [int]$profile.port) { return $false }
   if ($profile.publicBaseUrl -and (([string]$runtime.publicBaseUrl).TrimEnd("/") -ne ([string]$profile.publicBaseUrl).TrimEnd("/"))) {
@@ -280,8 +367,12 @@ function Invoke-BridgeRuntime([string]$runtimeAction, $profile = $null) {
     "-StateDir", $StateDir
   )
   if ($runtimeAction -eq "Start") {
+    $profileRoots = @(Get-ProfileAllowedRoots $profile)
+    $rootsJson = ConvertTo-Json -InputObject $profileRoots -Compress
+    $rootsBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($rootsJson))
     $arguments += @(
       "-ProjectRoot", [string]$profile.projectRoot,
+      "-AllowedRootsBase64", $rootsBase64,
       "-Tunnel", [string]$profile.tunnel,
       "-Port", [string]$profile.port,
       "-OperationId", $OperationId
@@ -320,7 +411,10 @@ function Stop-AndVerify($profile) {
     throw "Bridge Stop left a tunnel process on port $stopPort."
   }
   if ($stopResult -and $stopResult.remainingDevspace -and @($stopResult.remainingDevspace).Count -gt 0) {
-    throw "Bridge Stop left a DevSpace process. This release supports one managed bridge instance per Windows user."
+    throw "Bridge Stop left a DevSpace process listening on port $stopPort."
+  }
+  if ($stopResult -and $stopResult.remainingPortOwners -and @($stopResult.remainingPortOwners).Count -gt 0) {
+    throw "Bridge Stop left a process listening on port $stopPort."
   }
   return $stopResult
 }
@@ -398,9 +492,13 @@ try {
       $health = Test-BridgeHealth $runtime
       $profile = Get-JsonFile $ProfilePath
       $readinessIssues = @()
+      $securityWarnings = @(Get-ProfileSecurityWarnings $profile)
       if (-not $profile) { $readinessIssues += "controller-profile-missing" }
       if ($profile -and $profile.tunnel -eq "cloudflare-worker" -and (Get-CfApiMode) -eq "missing") {
         $readinessIssues += "cloudflare-kv-credential-missing"
+      }
+      if ($profile -and $profile.tunnel -eq "cloudflare-worker" -and (Get-CfApiMode) -match "plaintext-legacy") {
+        $readinessIssues += "cloudflare-kv-credential-plaintext-legacy"
       }
       if ($runtime -and $runtime.workerProxy -and ($runtime.workerProxy.needsKvUpdate -or $runtime.workerProxy.kvUpdateError)) {
         $readinessIssues += "runtime-worker-kv-not-confirmed"
@@ -411,6 +509,7 @@ try {
         health = $health
         restartReady = ($readinessIssues.Count -eq 0)
         readinessIssues = $readinessIssues
+        securityWarnings = $securityWarnings
         cfApiMode = Get-CfApiMode
         profileConfigured = (Test-Path -LiteralPath $ProfilePath)
         desiredState = Get-JsonFile $DesiredStatePath
@@ -423,26 +522,39 @@ try {
 
     "Configure" {
       $runtime = Get-JsonFile $RuntimeStatePath
-      $effectiveRoot = if ($ProjectRoot) { $ProjectRoot } elseif ($runtime) { [string]$runtime.projectRoot } else { $null }
+      $existingProfile = Get-JsonFile $ProfilePath
+      $effectiveRoot = if ($ProjectRoot) { $ProjectRoot } elseif ($existingProfile -and $existingProfile.projectRoot) { [string]$existingProfile.projectRoot } elseif ($runtime) { [string]$runtime.projectRoot } else { $null }
       if (-not $effectiveRoot) { throw "-ProjectRoot is required when there is no running bridge state to import." }
       $resolvedRoot = (Resolve-Path -LiteralPath $effectiveRoot).Path
-      $effectiveTunnel = if ($PSBoundParameters.ContainsKey("Tunnel")) { $Tunnel } elseif ($runtime) { [string]$runtime.tunnel } else { "cloudflare-worker" }
-      $effectivePort = if ($PSBoundParameters.ContainsKey("Port")) { $Port } elseif ($runtime -and $runtime.port) { [int]$runtime.port } else { 7676 }
-      $effectivePublicBase = if ($PublicBaseUrl) { $PublicBaseUrl.TrimEnd("/") } elseif ($runtime -and $runtime.publicBaseUrl) { ([string]$runtime.publicBaseUrl).TrimEnd("/") } else { $null }
+      $rootCandidates = if ($PSBoundParameters.ContainsKey("AllowedRoots")) {
+        @($AllowedRoots -split ";")
+      } elseif ($existingProfile) {
+        @(Get-ProfileAllowedRoots $existingProfile)
+      } elseif ($runtime) {
+        @(Get-ProfileAllowedRoots $runtime)
+      } else {
+        @($resolvedRoot)
+      }
+      $resolvedAllowedRoots = @(Resolve-AllowedRootPaths $rootCandidates $resolvedRoot)
+      $effectiveTunnel = if ($PSBoundParameters.ContainsKey("Tunnel")) { $Tunnel } elseif ($existingProfile -and $existingProfile.tunnel) { [string]$existingProfile.tunnel } elseif ($runtime) { [string]$runtime.tunnel } else { "cloudflare-worker" }
+      $effectivePort = if ($PSBoundParameters.ContainsKey("Port")) { $Port } elseif ($existingProfile -and $existingProfile.port) { [int]$existingProfile.port } elseif ($runtime -and $runtime.port) { [int]$runtime.port } else { 7676 }
+      $effectivePublicBase = if ($PublicBaseUrl) { $PublicBaseUrl.TrimEnd("/") } elseif ($existingProfile -and $existingProfile.publicBaseUrl) { ([string]$existingProfile.publicBaseUrl).TrimEnd("/") } elseif ($runtime -and $runtime.publicBaseUrl) { ([string]$runtime.publicBaseUrl).TrimEnd("/") } else { $null }
+      $effectiveInstallCloudflared = if ($PSBoundParameters.ContainsKey("InstallCloudflared")) { [bool]$InstallCloudflared } elseif ($existingProfile) { [bool]$existingProfile.installCloudflared } else { $false }
       if ($effectiveTunnel -eq "cloudflare-worker" -and -not $effectivePublicBase) {
         $proxy = Get-JsonFile $WorkerProxyConfigPath
         if ($proxy -and $proxy.workerBaseUrl) { $effectivePublicBase = ([string]$proxy.workerBaseUrl).TrimEnd("/") }
       }
-      if ($effectiveTunnel -eq "cloudflare-worker" -and -not (Test-AbsoluteHttpsUrl $effectivePublicBase)) {
-        throw "cloudflare-worker requires -PublicBaseUrl as an absolute HTTPS URL with a host."
+      if ($effectiveTunnel -in @("cloudflare-worker", "external") -and -not (Test-AbsoluteHttpsUrl $effectivePublicBase)) {
+        throw "$effectiveTunnel requires -PublicBaseUrl as an absolute HTTPS URL without credentials, query, or fragment."
       }
       $profile = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         projectRoot = $resolvedRoot
+        allowedRoots = $resolvedAllowedRoots
         tunnel = $effectiveTunnel
         port = $effectivePort
         publicBaseUrl = $effectivePublicBase
-        installCloudflared = [bool]$InstallCloudflared
+        installCloudflared = $effectiveInstallCloudflared
         configuredAt = (Get-Date).ToString("o")
       }
       Write-JsonFileAtomic $profile $ProfilePath
@@ -469,7 +581,7 @@ try {
         }
         Set-DesiredState $initialState $initialReason
       }
-      Write-ControllerEvent "configure" "passed" "Controller profile saved." ([ordered]@{ profilePath = $ProfilePath; projectRoot = $resolvedRoot; tunnel = $effectiveTunnel; port = $effectivePort })
+      Write-ControllerEvent "configure" "passed" "Controller profile saved." ([ordered]@{ profilePath = $ProfilePath; projectRoot = $resolvedRoot; allowedRoots = $resolvedAllowedRoots; tunnel = $effectiveTunnel; port = $effectivePort })
       Write-ControllerResult "success" "configure" "Controller profile is ready." ([ordered]@{ profilePath = $ProfilePath; desiredState = Get-JsonFile $DesiredStatePath })
       break
     }

@@ -3,12 +3,15 @@ param(
   [ValidateSet("Set", "Status", "Clear")]
   [string]$Action = "Status",
 
+  [ValidatePattern('^[A-Fa-f0-9]{32}$')]
   [string]$AccountId,
 
+  [ValidatePattern('^[A-Fa-f0-9]{32}$')]
   [string]$KvNamespaceId,
 
   [string]$WorkerBaseUrl,
 
+  [ValidateNotNullOrEmpty()]
   [string]$KvKey = "current",
 
   [string]$StateDir = (Join-Path $env:LOCALAPPDATA "devspace-bridge")
@@ -24,10 +27,38 @@ function Write-Json($obj) {
   [Console]::Out.WriteLine(($obj | ConvertTo-Json -Depth 6))
 }
 
-function Write-JsonFileNoBom($obj, [string]$path) {
+function Write-JsonFileAtomic($obj, [string]$path) {
   $json = $obj | ConvertTo-Json -Depth 6
   $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-  [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
+  $tempPath = "$path.$([Guid]::NewGuid().ToString('n')).tmp"
+  [System.IO.File]::WriteAllText($tempPath, $json, $utf8NoBom)
+  try {
+    if (Test-Path -LiteralPath $path) {
+      $backupPath = "$path.$([Guid]::NewGuid().ToString('n')).bak"
+      try {
+        [System.IO.File]::Replace($tempPath, $path, $backupPath)
+      } finally {
+        if (Test-Path -LiteralPath $backupPath) {
+          Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+      }
+    } else {
+      [System.IO.File]::Move($tempPath, $path)
+    }
+  } finally {
+    if (Test-Path -LiteralPath $tempPath) {
+      Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Ensure-DpapiType {
+  if (-not ("System.Security.Cryptography.ProtectedData" -as [type])) {
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+  }
+  if (-not ("System.Security.Cryptography.ProtectedData" -as [type])) {
+    throw "Windows DPAPI support could not be loaded in this PowerShell runtime."
+  }
 }
 
 function Get-JsonFile([string]$path) {
@@ -55,7 +86,7 @@ switch ($Action) {
     Write-Json ([ordered]@{
       action = "Status"
       configured = ($configured -or $legacyPresent)
-      effectiveMode = if ($configured) { "dpapi" } elseif ($legacyPresent) { "plaintext-legacy" } else { "missing" }
+      effectiveMode = if ($configured -and $legacyPresent) { "dpapi-with-plaintext-legacy" } elseif ($configured) { "dpapi" } elseif ($legacyPresent) { "plaintext-legacy" } else { "missing" }
       path = $ConfigPath
       legacyPath = $LegacyConfigPath
       legacyPresent = $legacyPresent
@@ -115,8 +146,11 @@ switch ($Action) {
       $parsedWorkerUri = $null
       if (-not [Uri]::TryCreate($effectiveWorkerBaseUrl, [UriKind]::Absolute, [ref]$parsedWorkerUri) -or
           $parsedWorkerUri.Scheme -ne "https" -or
-          [string]::IsNullOrWhiteSpace($parsedWorkerUri.Host)) {
-        throw "WorkerBaseUrl must be an absolute HTTPS URL with a host."
+          [string]::IsNullOrWhiteSpace($parsedWorkerUri.Host) -or
+          -not [string]::IsNullOrWhiteSpace($parsedWorkerUri.UserInfo) -or
+          -not [string]::IsNullOrWhiteSpace($parsedWorkerUri.Query) -or
+          -not [string]::IsNullOrWhiteSpace($parsedWorkerUri.Fragment)) {
+        throw "WorkerBaseUrl must be an absolute HTTPS URL without credentials, query, or fragment."
       }
     }
     $workerProxyRecord = if ($effectiveWorkerBaseUrl) {
@@ -131,6 +165,7 @@ switch ($Action) {
     $secureToken = Read-Host "Cloudflare API token (Workers KV Storage: Edit only)" -AsSecureString
     $bstr = [IntPtr]::Zero
     $plainBytes = $null
+    $roundTripBytes = $null
     try {
       $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
       $plainToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
@@ -138,11 +173,29 @@ switch ($Action) {
         throw "The API token cannot be empty."
       }
       $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($plainToken)
+      Ensure-DpapiType
       $cipherBytes = [System.Security.Cryptography.ProtectedData]::Protect(
         $plainBytes,
         $null,
         [System.Security.Cryptography.DataProtectionScope]::CurrentUser
       )
+      $roundTripBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $cipherBytes,
+        $null,
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+      )
+      $roundTripMatches = ($plainBytes.Length -eq $roundTripBytes.Length)
+      if ($roundTripMatches) {
+        for ($index = 0; $index -lt $plainBytes.Length; $index++) {
+          if ($plainBytes[$index] -ne $roundTripBytes[$index]) {
+            $roundTripMatches = $false
+            break
+          }
+        }
+      }
+      if (-not $roundTripMatches) {
+        throw "DPAPI round-trip verification failed; credential was not written."
+      }
       $record = [ordered]@{
         accountId = $AccountId
         kvNamespaceId = $KvNamespaceId
@@ -157,14 +210,20 @@ switch ($Action) {
       }
       if ($PSCmdlet.ShouldProcess($ConfigPath, $targetDescription)) {
         New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-        Write-JsonFileNoBom $record $ConfigPath
+        Write-JsonFileAtomic $record $ConfigPath
         if ($workerProxyRecord) {
-          Write-JsonFileNoBom $workerProxyRecord $WorkerProxyConfigPath
+          Write-JsonFileAtomic $workerProxyRecord $WorkerProxyConfigPath
+        }
+        if (Test-Path -LiteralPath $LegacyConfigPath) {
+          Remove-Item -LiteralPath $LegacyConfigPath -Force
         }
       }
     } finally {
+      if ($roundTripBytes) { [Array]::Clear($roundTripBytes, 0, $roundTripBytes.Length) }
       if ($plainBytes) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
       if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+      $plainToken = $null
+      $cipherBytes = $null
     }
 
     Write-Json ([ordered]@{
@@ -175,7 +234,7 @@ switch ($Action) {
       workerProxyPath = $WorkerProxyConfigPath
       workerProxyConfigured = (Test-Path -LiteralPath $WorkerProxyConfigPath)
       legacyPlaintextPresent = (Test-Path -LiteralPath $LegacyConfigPath)
-      note = "The token is encrypted for the current Windows user and is never printed. When a Worker URL is available, local-only worker-proxy.json metadata is synchronized too; keep it out of git. Remove any legacy cf-api.json after verifying migration."
+      note = "The token is encrypted for the current Windows user and is never printed. When a Worker URL is available, local-only worker-proxy.json metadata is synchronized too; keep it out of git. A legacy plaintext cf-api.json is removed after the DPAPI write and round-trip verification succeed."
     })
     break
   }
